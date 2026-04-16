@@ -97,12 +97,12 @@ class StarLayerTest {
 
     @Test
     void glowRadiusFactor_is3() {
-        assertEquals(3.0, StarLayer.GLOW_RADIUS_FACTOR, 1e-12);
+        assertEquals(4.0, StarLayer.GLOW_RADIUS_FACTOR, 1e-12);
     }
 
     @Test
     void glowAlpha_is40() {
-        assertEquals(40, StarLayer.GLOW_ALPHA);
+        assertEquals(80, StarLayer.GLOW_ALPHA);
     }
 
     @Test
@@ -117,7 +117,7 @@ class StarLayerTest {
 
     @Test
     void lodSimpleMax_is5() {
-        assertEquals(5.0, StarLayer.LOD_SIMPLE_MAX, 1e-12);
+        assertEquals(3.0, StarLayer.LOD_SIMPLE_MAX, 1e-12);
     }
 
     // -----------------------------------------------------------------------

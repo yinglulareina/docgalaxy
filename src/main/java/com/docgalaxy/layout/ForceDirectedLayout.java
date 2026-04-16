@@ -55,6 +55,9 @@ public final class ForceDirectedLayout implements LayoutStrategy {
     private final double canvasHeight;
     private final OverlapResolver overlapResolver;
 
+    /** Number of iterations used in the most recent {@link #calculate} call. */
+    private int lastIterationCount;
+
     // -------------------------------------------------------------------------
     // Construction
     // -------------------------------------------------------------------------
@@ -125,8 +128,9 @@ public final class ForceDirectedLayout implements LayoutStrategy {
         // Step 4 — iteration loop
         SpatialGrid grid = new SpatialGrid();
         double temp = AppConstants.INITIAL_TEMPERATURE;
+        int iter = 0;
 
-        for (int iter = 0;
+        for (;
              iter < AppConstants.MAX_ITERATIONS && temp > AppConstants.MIN_TEMPERATURE;
              iter++) {
 
@@ -186,6 +190,7 @@ public final class ForceDirectedLayout implements LayoutStrategy {
             // Cool temperature
             temp *= AppConstants.COOLING_FACTOR;
         }
+        lastIterationCount = iter;
 
         // Step 5 — resolve residual overlaps
         List<CelestialBody> bodies = buildBodies(nodes, pos);
@@ -204,6 +209,12 @@ public final class ForceDirectedLayout implements LayoutStrategy {
     /** {@inheritDoc} */
     @Override
     public String getName() { return "Galaxy"; }
+
+    /**
+     * Returns the number of iterations used in the most recent {@link #calculate}
+     * call.  Returns 0 if {@code calculate} has not been called yet.
+     */
+    public int getLastIterationCount() { return lastIterationCount; }
 
     // -------------------------------------------------------------------------
     // Private helpers

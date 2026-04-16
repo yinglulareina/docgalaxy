@@ -1,5 +1,6 @@
 package com.docgalaxy.ui.canvas;
 
+import com.docgalaxy.model.Edge;
 import com.docgalaxy.model.Vector2D;
 import com.docgalaxy.model.celestial.CelestialBody;
 import com.docgalaxy.model.celestial.Nebula;
@@ -54,6 +55,9 @@ public final class GalaxyCanvas extends JPanel implements CanvasController {
 
     /** Flat body list for hit testing. Not rendered directly — layers own rendering. */
     private final List<CelestialBody> bodies = new ArrayList<>();
+
+    /** Live edge list — shared with EdgeLayer, used for hit testing by the interaction handler. */
+    private List<Edge> edges = Collections.emptyList();
 
     /** Optional overlay layer for highlight / route rendering. */
     private OverlayLayer overlayLayer;
@@ -174,6 +178,25 @@ public final class GalaxyCanvas extends JPanel implements CanvasController {
      */
     public List<CelestialBody> getBodies() {
         return Collections.unmodifiableList(bodies);
+    }
+
+    /**
+     * Sets the live edge list used for click hit-testing.
+     * The same list should be passed to {@code EdgeLayer} so they stay in sync.
+     *
+     * @param edges list of edges; {@code null} is treated as empty
+     */
+    public void setEdges(List<Edge> edges) {
+        this.edges = (edges != null) ? edges : Collections.emptyList();
+    }
+
+    /**
+     * Returns the current edge list.
+     *
+     * @return live edge list; never {@code null}
+     */
+    public List<Edge> getEdges() {
+        return edges;
     }
 
     /**

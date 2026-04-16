@@ -12,10 +12,13 @@ import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.MultipleGradientPaint;
 import java.awt.RadialGradientPaint;
+import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.geom.AffineTransform;
 import java.awt.geom.Point2D;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -49,6 +52,21 @@ public final class NebulaLayer implements RenderLayer {
 
     /** Peak alpha (0–255) for the sector colour at the blob centre. */
     static final int BLOB_PEAK_ALPHA = 55;
+
+    /** Padding (px) added around each label bounding box for collision tests. */
+    private static final int LABEL_PADDING = 10;
+
+    /** Candidate Y offset (px) for down/up alternatives. */
+    private static final int LABEL_OFFSET_Y = 30;
+
+    /** Candidate X offset (px) for left/right alternatives. */
+    private static final int LABEL_OFFSET_X = 50;
+
+    /** Font size used when zoom ≥ 0.3 (zoom-in range). */
+    private static final int FONT_SIZE_CLOSE = 13;
+
+    /** Font size used when zoom < 0.3 (zoom-out / galaxy view). */
+    private static final int FONT_SIZE_FAR = 16;
 
     /**
      * Three blob descriptors: {offsetXFraction, offsetYFraction,
@@ -108,24 +126,88 @@ public final class NebulaLayer implements RenderLayer {
         g.setRenderingHint(RenderingHints.KEY_RENDERING,
                            RenderingHints.VALUE_RENDER_QUALITY);
 
+        // Choose label font size based on zoom level
+        int fontSize = (zoom < FULL_ALPHA_ZOOM) ? FONT_SIZE_FAR : FONT_SIZE_CLOSE;
+        Font labelFont = ThemeManager.FONT_SECTOR_LABEL.deriveFont(Font.BOLD, fontSize);
+
         Composite savedComposite = g.getComposite();
         Font      savedFont      = g.getFont();
         Color     savedColor     = g.getColor();
         AffineTransform savedTx  = g.getTransform();
 
         try {
+            // ── Pass 1: collect visible nebulae, sorted by noteCount descending ──
+            g.setFont(labelFont);
+            FontMetrics fm = g.getFontMetrics();
+
+            // Pair: [nebula, sx, sy, sr, alpha]
+            record NebRecord(Nebula nebula, double sx, double sy, double sr, float alpha) {}
+            List<NebRecord> visible = new ArrayList<>();
             for (Nebula nebula : nebulae) {
                 double sx = nebula.getPosition().getX() * zoom + offsetX;
                 double sy = nebula.getPosition().getY() * zoom + offsetY;
                 double sr = nebula.getRadius() * zoom;
-                if (sr < 1.0) continue;  // too small to see
-
-                // Combine layer alpha with the nebula's own alpha field
+                if (sr < 1.0) continue;
                 float alpha = layerAlpha * nebula.getAlpha();
                 if (alpha <= 0f) continue;
+                visible.add(new NebRecord(nebula, sx, sy, sr, alpha));
+            }
+            // Larger clusters render labels first (higher priority)
+            visible.sort(Comparator.comparingInt(
+                    (NebRecord r) -> r.nebula().getSector().getNoteCount()).reversed());
 
-                renderBlobs(g, savedTx, sx, sy, sr, alpha, nebula.getColor());
-                renderLabel(g, sx, sy, alpha, nebula.getSector().getLabel());
+            // ── Pass 2: draw blobs for all (order doesn't matter for blobs) ────
+            for (NebRecord rec : visible) {
+                renderBlobs(g, savedTx, rec.sx(), rec.sy(), rec.sr(),
+                            rec.alpha(), rec.nebula().getColor());
+            }
+
+            // ── Pass 3: place labels with collision detection ─────────────────
+            List<Rectangle> placed = new ArrayList<>();
+            for (NebRecord rec : visible) {
+                String label = rec.nebula().getSector().getLabel();
+                if (label == null || label.isBlank()) continue;
+
+                int textW = fm.stringWidth(label);
+                int textH = fm.getHeight();
+
+                // Five candidate anchor positions (top-left of text bbox)
+                int[][] candidates = {
+                    { (int) Math.round(rec.sx() - textW / 2.0),
+                      (int) Math.round(rec.sy() - textH / 2.0) },                    // centre
+                    { (int) Math.round(rec.sx() - textW / 2.0),
+                      (int) Math.round(rec.sy() - textH / 2.0) + LABEL_OFFSET_Y },   // below
+                    { (int) Math.round(rec.sx() - textW / 2.0),
+                      (int) Math.round(rec.sy() - textH / 2.0) - LABEL_OFFSET_Y },   // above
+                    { (int) Math.round(rec.sx() - textW / 2.0) - LABEL_OFFSET_X,
+                      (int) Math.round(rec.sy() - textH / 2.0) },                    // left
+                    { (int) Math.round(rec.sx() - textW / 2.0) + LABEL_OFFSET_X,
+                      (int) Math.round(rec.sy() - textH / 2.0) },                    // right
+                };
+
+                int bestX = candidates[0][0];
+                int bestY = candidates[0][1];
+                int bestOverlap = Integer.MAX_VALUE;
+
+                for (int[] cand : candidates) {
+                    Rectangle bbox = paddedRect(cand[0], cand[1], textW, textH);
+                    int overlap = totalOverlap(bbox, placed);
+                    if (overlap < bestOverlap) {
+                        bestOverlap = overlap;
+                        bestX = cand[0];
+                        bestY = cand[1];
+                        if (overlap == 0) break;   // perfect placement found
+                    }
+                }
+
+                Rectangle chosen = paddedRect(bestX, bestY, textW, textH);
+                placed.add(chosen);
+
+                // Draw the label
+                g.setFont(labelFont);
+                g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, rec.alpha()));
+                g.setColor(ThemeManager.TEXT_SECONDARY);
+                g.drawString(label, bestX, bestY + fm.getAscent());
             }
         } finally {
             g.setComposite(savedComposite);
@@ -211,23 +293,30 @@ public final class NebulaLayer implements RenderLayer {
     }
 
     // -------------------------------------------------------------------------
-    // Private — label rendering
+    // Private — label collision helpers
     // -------------------------------------------------------------------------
 
-    /** Draws the sector label centred at the nebula's screen position. */
-    private static void renderLabel(Graphics2D g,
-                                    double sx, double sy,
-                                    float alpha, String label) {
-        if (label == null || label.isBlank()) return;
+    /**
+     * Returns a {@link Rectangle} expanded by {@value #LABEL_PADDING} px on
+     * each side, used for overlap testing.
+     */
+    private static Rectangle paddedRect(int x, int y, int w, int h) {
+        return new Rectangle(x - LABEL_PADDING, y - LABEL_PADDING,
+                             w + LABEL_PADDING * 2, h + LABEL_PADDING * 2);
+    }
 
-        g.setFont(ThemeManager.FONT_SECTOR_LABEL);
-        g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
-        g.setColor(ThemeManager.TEXT_SECONDARY);
-
-        FontMetrics fm = g.getFontMetrics();
-        int textW = fm.stringWidth(label);
-        int labelX = (int) Math.round(sx - textW / 2.0);
-        int labelY = (int) Math.round(sy + fm.getAscent() / 2.0);
-        g.drawString(label, labelX, labelY);
+    /**
+     * Returns the total intersection area between {@code bbox} and every
+     * rectangle in {@code placed}.  Zero means no overlap.
+     */
+    private static int totalOverlap(Rectangle bbox, List<Rectangle> placed) {
+        int total = 0;
+        for (Rectangle r : placed) {
+            Rectangle inter = bbox.intersection(r);
+            if (!inter.isEmpty()) {
+                total += inter.width * inter.height;
+            }
+        }
+        return total;
     }
 }

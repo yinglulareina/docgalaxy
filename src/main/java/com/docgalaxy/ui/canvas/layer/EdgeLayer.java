@@ -42,14 +42,29 @@ public final class EdgeLayer implements RenderLayer {
     /** Zoom level below which this layer is completely skipped. */
     static final double SHOW_THRESHOLD = 0.4;
 
-    /** Stroke width for all edges (screen pixels, independent of zoom). */
+    /** Stroke width for normal edges (screen pixels). */
     static final float STROKE_WIDTH = 0.5f;
+
+    /** Stroke width for a highlighted edge. */
+    static final float HIGHLIGHT_STROKE_WIDTH = 2.0f;
+
+    /** Alpha for a highlighted edge line (0-255). */
+    static final int HIGHLIGHT_ALPHA = 200;
+
+    /** Radius (px) of the endpoint glow ring drawn for highlighted edges. */
+    static final float HIGHLIGHT_HALO_RADIUS = 10.0f;
+
+    /** Alpha for the endpoint halo. */
+    static final int HIGHLIGHT_HALO_ALPHA = 50;
 
     /** Similarity multiplier → alpha channel (0–255). */
     static final double ALPHA_SCALE = 40.0;
 
     private static final BasicStroke EDGE_STROKE = new BasicStroke(
             STROKE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
+
+    private static final BasicStroke HIGHLIGHT_STROKE = new BasicStroke(
+            HIGHLIGHT_STROKE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
 
     private final List<Edge>             edges;
     private final Map<String, Vector2D>  positions;
@@ -102,24 +117,36 @@ public final class EdgeLayer implements RenderLayer {
         Stroke    savedStroke    = g.getStroke();
 
         try {
-            g.setStroke(EDGE_STROKE);
-
             for (Edge edge : edges) {
                 Vector2D from = positions.get(edge.getFromId());
                 Vector2D to   = positions.get(edge.getToId());
                 if (from == null || to == null) continue;
-
-                int alpha = (int) Math.round(
-                        Math.min(255.0, Math.max(0.0, edge.getSimilarity() * ALPHA_SCALE)));
-                if (alpha == 0) continue;
 
                 double x1 = from.getX() * zoom + offsetX;
                 double y1 = from.getY() * zoom + offsetY;
                 double x2 = to.getX()   * zoom + offsetX;
                 double y2 = to.getY()   * zoom + offsetY;
 
-                g.setColor(new Color(255, 255, 255, alpha));
-                g.draw(new Line2D.Double(x1, y1, x2, y2));
+                if (edge.isHighlighted()) {
+                    // ── Endpoint halos ────────────────────────────────────────
+                    g.setColor(new Color(255, 255, 255, HIGHLIGHT_HALO_ALPHA));
+                    g.setStroke(new BasicStroke(1f));
+                    float hr = HIGHLIGHT_HALO_RADIUS;
+                    g.fillOval((int)(x1 - hr), (int)(y1 - hr), (int)(hr*2), (int)(hr*2));
+                    g.fillOval((int)(x2 - hr), (int)(y2 - hr), (int)(hr*2), (int)(hr*2));
+
+                    // ── Highlighted line ──────────────────────────────────────
+                    g.setStroke(HIGHLIGHT_STROKE);
+                    g.setColor(new Color(255, 255, 255, HIGHLIGHT_ALPHA));
+                    g.draw(new Line2D.Double(x1, y1, x2, y2));
+                } else {
+                    int alpha = (int) Math.round(
+                            Math.min(255.0, Math.max(0.0, edge.getSimilarity() * ALPHA_SCALE)));
+                    if (alpha == 0) continue;
+                    g.setStroke(EDGE_STROKE);
+                    g.setColor(new Color(255, 255, 255, alpha));
+                    g.draw(new Line2D.Double(x1, y1, x2, y2));
+                }
             }
         } finally {
             g.setComposite(savedComposite);

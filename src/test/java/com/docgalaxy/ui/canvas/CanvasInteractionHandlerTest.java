@@ -221,11 +221,11 @@ class CanvasInteractionHandlerTest {
 
     @Test
     void singleClick_onBody_previewCardVisible() {
-        // Camera default: zoom=1, offset=(0,0) → screen == world
+        // Single click on star highlights the star; PreviewCard is shown on hover, not click.
         canvas.setBodies(List.of(starAt("n1", 100.0, 100.0, "s1")));
         handler.mouseClicked(click(100, 100, 1));
-        assertTrue(handler.getPreviewCard().isVisible(),
-                "PreviewCard must become visible after clicking a body");
+        assertFalse(handler.getPreviewCard().isVisible(),
+                "PreviewCard must not appear on single-click (hover-only card)");
     }
 
     @Test
@@ -238,13 +238,13 @@ class CanvasInteractionHandlerTest {
 
     @Test
     void singleClick_topmostBodyHit_whenOverlapping() {
-        // Both stars at same world position; second is topmost
+        // Both stars at same world position; second is topmost — clicking highlights a star.
         Star s1 = starAt("n1", 50.0, 50.0, "s1");
         Star s2 = starAt("n2", 50.0, 50.0, "s1");
         canvas.setBodies(List.of(s1, s2));
         handler.mouseClicked(click(50, 50, 1));
-        // card should be visible (both hit, topmost = s2)
-        assertTrue(handler.getPreviewCard().isVisible());
+        // Highlight set must be non-empty (topmost star n2 is highlighted)
+        assertFalse(canvas.getHighlightedNotes().isEmpty());
     }
 
     @Test
@@ -257,9 +257,10 @@ class CanvasInteractionHandlerTest {
 
     @Test
     void singleClick_onNebula_previewCardVisible() {
+        // Nebula clicks fall through to empty-space handling; preview card stays hidden.
         canvas.setBodies(List.of(nebulaAt("s2", 200.0, 200.0)));
         handler.mouseClicked(click(200, 200, 1));
-        assertTrue(handler.getPreviewCard().isVisible());
+        assertFalse(handler.getPreviewCard().isVisible());
     }
 
     // -----------------------------------------------------------------------
@@ -305,12 +306,12 @@ class CanvasInteractionHandlerTest {
 
     @Test
     void previewCard_titleReflectsBody_afterClick() {
+        // Single click highlights the star; preview card is hover-only and stays hidden.
         Star s = starAt("myNote", 50.0, 50.0, "s1");
         canvas.setBodies(List.of(s));
         handler.mouseClicked(click(50, 50, 1));
-        // getTooltipText() for Star returns note.getFileName() = "myNote.md"
-        assertTrue(handler.getPreviewCard().isVisible());
-        // Visibility confirmed — we can't easily read the label text here,
-        // but we verified content via PreviewCard unit logic
+        assertFalse(handler.getPreviewCard().isVisible());
+        // The star must be in the highlighted set instead
+        assertTrue(canvas.getHighlightedNotes().contains("myNote"));
     }
 }

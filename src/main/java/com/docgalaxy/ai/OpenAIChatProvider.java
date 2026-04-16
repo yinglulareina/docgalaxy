@@ -103,6 +103,7 @@ public class OpenAIChatProvider implements ChatProvider {
         JsonObject body = new JsonObject();
         body.addProperty("model", MODEL);
         body.add("messages", messages);
+        body.addProperty("max_tokens", 150);
         return body;
     }
 
