@@ -42,4 +42,10 @@ public final class AppConstants {
     public static final int SIDEBAR_WIDTH = 240;
     public static final int PREVIEW_CARD_WIDTH = 280;
     public static final int PREVIEW_CARD_HEIGHT = 160;
+    public static final int PROGRESS_DIALOG_WIDTH = 320;
+    public static final int PROGRESS_DIALOG_HEIGHT = 100;
+    public static final int NAVIGATOR_PANEL_WIDTH = 210;
+
+    // Embedding
+    public static final int DEFAULT_EMBEDDING_DIMENSION = 1536;
 }

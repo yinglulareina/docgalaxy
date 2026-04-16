@@ -6,6 +6,7 @@ import com.docgalaxy.ai.navigator.NavigatorService;
 import com.docgalaxy.ai.navigator.RouteStep;
 import com.docgalaxy.model.KnowledgeBase;
 import com.docgalaxy.ui.ThemeManager;
+import com.docgalaxy.util.AppConstants;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -215,13 +216,15 @@ public class NavigatorPanel extends JPanel {
     }
 
     private void displayResult(NavigationResult result) {
-        addMessage(result.getSummary(), false);
+        SwingUtilities.invokeLater(() -> {
+            addMessage(result.getSummary(), false);
 
-        // Highlight notes on canvas
-        Set<String> ids = result.getRoute().stream()
-            .map(RouteStep::getNoteId)
-            .collect(Collectors.toSet());
-        if (onHighlight != null) onHighlight.accept(ids);
+            // Highlight notes on canvas
+            Set<String> ids = result.getRoute().stream()
+                .map(RouteStep::getNoteId)
+                .collect(Collectors.toSet());
+            if (onHighlight != null) onHighlight.accept(ids);
+        });
     }
 
     // ----------------------------------------------------------------
@@ -255,7 +258,7 @@ public class NavigatorPanel extends JPanel {
         wrapper.setBackground(ThemeManager.BG_SECONDARY);
         wrapper.setOpaque(false);
 
-        area.setMaximumSize(new Dimension(210, Integer.MAX_VALUE));
+        area.setMaximumSize(new Dimension(AppConstants.NAVIGATOR_PANEL_WIDTH, Integer.MAX_VALUE));
         wrapper.add(area);
         return wrapper;
     }

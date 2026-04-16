@@ -70,6 +70,9 @@ public final class GalaxyCanvas extends JPanel implements CanvasController {
     private final Set<String> highlightedNotes = new HashSet<>();
     private final List<String> navigationRoute  = new ArrayList<>();
 
+    /** Callback fired whenever the zoom level changes (via mouse wheel). */
+    private Runnable onZoomChange;
+
     // -------------------------------------------------------------------------
     // Construction
     // -------------------------------------------------------------------------
@@ -238,6 +241,12 @@ public final class GalaxyCanvas extends JPanel implements CanvasController {
     public CanvasInteractionHandler getInteractionHandler() {
         return interactionHandler;
     }
+
+    /** Registers a callback fired on every zoom gesture. */
+    public void setOnZoomChange(Runnable callback) { this.onZoomChange = callback; }
+
+    /** Called by {@link CanvasInteractionHandler} after every zoom gesture. */
+    void notifyZoomChange() { if (onZoomChange != null) onZoomChange.run(); }
 
     // -------------------------------------------------------------------------
     // CanvasController — highlighting

@@ -33,6 +33,8 @@ public class SettingsDialog extends JDialog {
     // Appearance tab
     private final JComboBox<LearningStyle> styleBox;
 
+    private JButton saveButton;
+
     private final ConfigStore configStore;
     private       AppConfig   current;
     private Consumer<AppConfig> onSaved;
@@ -147,11 +149,11 @@ public class SettingsDialog extends JDialog {
         JButton cancel = new JButton("Cancel");
         cancel.addActionListener(e -> dispose());
 
-        JButton save = new JButton("Save");
-        save.addActionListener(e -> save());
+        saveButton = new JButton("Save");
+        saveButton.addActionListener(e -> save());
 
         row.add(cancel);
-        row.add(save);
+        row.add(saveButton);
         return row;
     }
 
@@ -202,14 +204,28 @@ public class SettingsDialog extends JDialog {
         LearningStyle style = (LearningStyle) styleBox.getSelectedItem();
         if (style != null) current.setLearningStyle(style.name());
 
-        try {
-            configStore.save(current);
-            if (onSaved != null) onSaved.accept(current);
-            dispose();
-        } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this,
-                "Failed to save settings: " + ex.getMessage(),
-                "Save Error", JOptionPane.ERROR_MESSAGE);
-        }
+        saveButton.setEnabled(false);
+
+        new SwingWorker<Void, Void>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                configStore.save(current);
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                saveButton.setEnabled(true);
+                try {
+                    get();
+                    if (onSaved != null) onSaved.accept(current);
+                    dispose();
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(SettingsDialog.this,
+                        "Failed to save settings: " + ex.getMessage(),
+                        "Save Error", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
     }
 }

@@ -149,10 +149,34 @@ public final class CanvasInteractionHandler extends MouseAdapter
         if (hit.getId().equals(lastHoveredStarId)) return;   // same star, no refresh
 
         lastHoveredStarId = hit.getId();
-        String snippet = readSnippet(hit.getNote().getFilePath(), 100);
-        previewCard.showHover(hit, snippet, e.getPoint(),
+
+        // Show card immediately with empty snippet; file read happens off EDT
+        previewCard.showHover(hit, "", e.getPoint(),
                               canvas.getWidth(), canvas.getHeight());
         canvas.repaint();
+
+        final Star  hoveredStar = hit;
+        final String hoveredId  = hit.getId();
+        final Point  hoverPoint = e.getPoint();
+        new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() {
+                return readSnippet(hoveredStar.getNote().getFilePath(), 100);
+            }
+
+            @Override
+            protected void done() {
+                if (!hoveredId.equals(lastHoveredStarId)) return;
+                try {
+                    String snippet = get();
+                    if (!snippet.isBlank()) {
+                        previewCard.showHover(hoveredStar, snippet, hoverPoint,
+                                             canvas.getWidth(), canvas.getHeight());
+                        canvas.repaint();
+                    }
+                } catch (Exception ignored) { }
+            }
+        }.execute();
     }
 
     // -------------------------------------------------------------------------
@@ -224,6 +248,7 @@ public final class CanvasInteractionHandler extends MouseAdapter
         double factor = Math.pow(ZOOM_STEP, -e.getPreciseWheelRotation());
         canvas.getCamera().zoomAt(e.getX(), e.getY(), factor);
         canvas.repaint();
+        canvas.notifyZoomChange();
     }
 
     // -------------------------------------------------------------------------

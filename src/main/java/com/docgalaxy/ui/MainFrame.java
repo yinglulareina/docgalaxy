@@ -8,9 +8,12 @@ import com.docgalaxy.ai.OpenAIEmbeddingProvider;
 import com.docgalaxy.ai.VectorDatabase;
 import com.docgalaxy.ai.cluster.Cluster;
 import com.docgalaxy.ai.cluster.HybridClusterStrategy;
+import com.docgalaxy.ai.navigator.NavigatorService;
+import com.docgalaxy.ai.navigator.RAGNavigator;
 import com.docgalaxy.layout.DimensionReducer;
 import com.docgalaxy.layout.ForceDirectedLayout;
 import com.docgalaxy.layout.NodeData;
+import com.docgalaxy.layout.RadialLayout;
 import com.docgalaxy.model.Edge;
 import com.docgalaxy.model.KnowledgeBase;
 import com.docgalaxy.model.Note;
@@ -25,6 +28,7 @@ import com.docgalaxy.persistence.PersistenceManager;
 import com.docgalaxy.ui.canvas.GalaxyCanvas;
 import com.docgalaxy.ui.canvas.layer.BackgroundLayer;
 import com.docgalaxy.ui.canvas.layer.EdgeLayer;
+import com.docgalaxy.ui.canvas.layer.GalaxyOverlayLayer;
 import com.docgalaxy.ui.canvas.layer.LabelLayer;
 import com.docgalaxy.ui.canvas.layer.NebulaLayer;
 import com.docgalaxy.ui.canvas.layer.StarLayer;
@@ -79,6 +83,15 @@ public class MainFrame extends JFrame {
     private PersistenceManager   persistenceManager;
     private Path                 currentStoreDir;
 
+    // Pipeline state – stored for layout re-computation after KB is loaded
+    private List<NodeData>        lastNodeDataList;
+    private List<Note>            lastNotes;
+    private List<Sector>          lastSectors;
+    private List<Edge>            lastEdges;
+    private Map<String, String>   lastNoteToSector;
+    private Map<String, Sector>   lastSectorById;
+    private Map<String, Vector2D> lastPositions;
+
     // ----------------------------------------------------------------
     // Construction
     // ----------------------------------------------------------------
@@ -131,20 +144,71 @@ public class MainFrame extends JFrame {
     private void wireSidebar() {
         sidebar.setOnSearch(query -> {
             if (kbManager == null) return;
-            KnowledgeBase kb = kbManager.getKnowledgeBase();
-            var ids = kb.getAllNotes().stream()
-                .filter(n -> n.getFileName().toLowerCase()
-                              .contains(query.toLowerCase()))
-                .map(n -> n.getId())
-                .collect(Collectors.toSet());
+            if (query.length() < 2) return;
+            String lower = query.toLowerCase();
+
+            // Restrict to notes that actually have a Star on the canvas (#2)
+            Set<String> canvasStarIds = galaxyCanvas.getBodies().stream()
+                    .filter(b -> b instanceof Star)
+                    .map(b -> (Star) b)
+                    .map(s -> s.getNote().getId())
+                    .collect(Collectors.toSet());
+            if (canvasStarIds.isEmpty()) return;
+
+            record Scored(Note note, int priority) {}
+
+            // Phase 1: filename matches only (#3)
+            List<Scored> fileNameMatches = new ArrayList<>();
+            for (Note note : kbManager.getKnowledgeBase().getAllNotes()) {
+                if (!canvasStarIds.contains(note.getId())) continue;
+                String fileName = note.getFileName().toLowerCase();
+                String baseName = fileName.replaceAll("\\.(md|txt)$", "");
+                if (baseName.equals(lower)) {
+                    fileNameMatches.add(new Scored(note, 1));
+                } else if (fileName.contains(lower)) {
+                    fileNameMatches.add(new Scored(note, 2));
+                }
+            }
+
+            // Phase 2: fall back to content only when no filename matched (#3)
+            List<Scored> results;
+            if (!fileNameMatches.isEmpty()) {
+                results = fileNameMatches;
+            } else {
+                results = new ArrayList<>();
+                for (Note note : kbManager.getKnowledgeBase().getAllNotes()) {
+                    if (!canvasStarIds.contains(note.getId())) continue;
+                    if (readFirst500(note.getFilePath()).toLowerCase().contains(lower)) {
+                        results.add(new Scored(note, 3));
+                    }
+                }
+            }
+
+            results.sort((a, b) -> {
+                if (a.priority() != b.priority()) return Integer.compare(a.priority(), b.priority());
+                return a.note().getFileName().compareToIgnoreCase(b.note().getFileName());
+            });
+
+            Set<String> ids = results.stream()
+                    .map(s -> s.note().getId())
+                    .collect(Collectors.toSet());
+
+            if (ids.isEmpty()) {
+                galaxyCanvas.clearHighlight();
+                statusBar.setStatus("No results found");
+                return;
+            }
+
             galaxyCanvas.highlightNotes(ids);
-            statusBar.setStatus("Found " + ids.size() + " note(s) matching \"" + query + "\"");
+            statusBar.setStatus("Found " + ids.size() + " note(s) for \"" + query + "\"");
         });
 
         sidebar.setOnSearchClear(galaxyCanvas::clearHighlight);
 
-        sidebar.setOnSectorSelected(sector ->
-            statusBar.setStatus("Sector: " + sector.getLabel()));
+        sidebar.setOnSectorSelected(sector -> {
+            galaxyCanvas.navigateToSector(sector.getId());
+            statusBar.setStatus("Sector: " + sector.getLabel());
+        });
 
         sidebar.setOnIncubatorNoteSelected(note ->
             statusBar.setStatus("Incubator: " + note.getFileName()
@@ -168,8 +232,37 @@ public class MainFrame extends JFrame {
             }
         });
 
-        toolBar.setOnLayoutSwitch(layoutName ->
-            statusBar.setStatus("Layout: " + layoutName));
+        toolBar.setOnLayoutSwitch(layoutName -> {
+            if (lastNodeDataList == null || lastNodeDataList.isEmpty()) {
+                statusBar.setStatus("Layout: " + layoutName + " (no KB loaded)");
+                return;
+            }
+            // Choose strategy by name (Tree falls back to Radial)
+            var strategy = switch (layoutName) {
+                case "Radial" -> new RadialLayout();
+                default       -> new ForceDirectedLayout();
+            };
+            statusBar.setStatus("Computing " + layoutName + " layout…");
+            new SwingWorker<Map<String, Vector2D>, Void>() {
+                @Override
+                protected Map<String, Vector2D> doInBackground() throws Exception {
+                    return strategy.calculate(lastNodeDataList);
+                }
+                @Override
+                protected void done() {
+                    try {
+                        applyNewLayout(get());
+                        statusBar.setStatus("Layout: " + layoutName);
+                    } catch (Exception ex) {
+                        statusBar.setStatus("Layout switch failed: " + ex.getMessage());
+                    }
+                }
+            }.execute();
+        });
+
+        // Wire zoom changes to status bar (#9)
+        galaxyCanvas.setOnZoomChange(
+            () -> statusBar.setZoom(galaxyCanvas.getZoom()));
 
         toolBar.setOnSettings(() -> {
             if (currentStoreDir != null) {
@@ -194,25 +287,33 @@ public class MainFrame extends JFrame {
      * ForceDirectedLayout → build Star/Nebula/Edge → populate canvas.
      */
     public void openKnowledgeBase(Path rootPath) {
-        currentStoreDir = rootPath.resolve(AppConstants.DOT_DIR);
+        try {
+            currentStoreDir = rootPath.resolve(AppConstants.DOT_DIR);
 
-        KnowledgeBase kb = new KnowledgeBase(rootPath);
-        IndexStore    is = new IndexStore(currentStoreDir);
-        EmbeddingStore es = new EmbeddingStore(currentStoreDir, 1536);
+            KnowledgeBase kb = new KnowledgeBase(rootPath);
+            IndexStore    is = new IndexStore(currentStoreDir);
+            EmbeddingStore es = new EmbeddingStore(currentStoreDir,
+                                                   AppConstants.DEFAULT_EMBEDDING_DIMENSION);
 
-        persistenceManager = new PersistenceManager();
-        persistenceManager.init(kb, is, es);
+            persistenceManager = new PersistenceManager();
+            persistenceManager.init(kb, is, es);
 
-        kbManager = new KnowledgeBaseManager(kb, is, persistenceManager);
-        kbManager.loadPersistedIndex();
+            kbManager = new KnowledgeBaseManager(kb, is, persistenceManager);
+            kbManager.loadPersistedIndex();
 
-        kbManager.setOnGalaxyRefresh(ignored ->
-            SwingUtilities.invokeLater(() -> refreshUIFromKB(kb)));
+            kbManager.setOnGalaxyRefresh(ignored ->
+                SwingUtilities.invokeLater(() -> refreshUIFromKB(kb)));
 
-        statusBar.setStatus("Opened: " + rootPath.getFileName() + " — building galaxy…");
+            statusBar.setStatus("Opened: " + rootPath.getFileName() + " — building galaxy…");
 
-        // Run the heavy pipeline off the EDT
-        new PipelineWorker(rootPath, kb).execute();
+            // Run the heavy pipeline off the EDT
+            new PipelineWorker(rootPath, kb).execute();
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Failed to open knowledge base", e);
+            JOptionPane.showMessageDialog(this,
+                "Failed to open knowledge base: " + e.getMessage(),
+                "Error", JOptionPane.ERROR_MESSAGE);
+        }
     }
 
     /** Load the bundled demo knowledge base from classpath resources. */
@@ -259,6 +360,9 @@ public class MainFrame extends JFrame {
         @Override
         protected Void doInBackground() {
             long pipelineStart = System.currentTimeMillis();
+
+            // Clear stale notes from previous run / persisted index (#1)
+            kb.getAllNotes().clear();
 
             List<Path> files = scanFiles(folder);
             if (files.isEmpty()) {
@@ -451,10 +555,16 @@ public class MainFrame extends JFrame {
                     System.currentTimeMillis() - pipelineStart,
                     stars.size(), nebulae.size(), edges.size());
 
-            final List<Star>   fStars   = stars;
-            final List<Nebula> fNebulae = nebulae;
-            final List<Edge>   fEdges   = edges;
-            final List<Sector> fSectors = sectors;
+            final List<Star>              fStars        = stars;
+            final List<Nebula>            fNebulae      = nebulae;
+            final List<Edge>              fEdges        = edges;
+            final List<Sector>            fSectors      = sectors;
+            final List<Note>              fNotes        = notes;
+            final List<NodeData>          fNodeDataList = nodeDataList;
+            final Map<String, String>     fNoteToSector = noteToSector;
+            final Map<String, Sector>     fSectorById   = sectorById;
+            final Map<String, Vector2D>   fFinalPositions = new HashMap<>(finalPositions);
+            final OpenAIChatProvider      fChatProvider = chatProvider;
 
             SwingUtilities.invokeLater(() -> {
                 // Clear old layers
@@ -476,6 +586,7 @@ public class MainFrame extends JFrame {
                 galaxyCanvas.addLayer(new StarLayer(fStars));
                 galaxyCanvas.addLayer(new EdgeLayer(fEdges, posMap));
                 galaxyCanvas.addLayer(new LabelLayer(fStars));
+                galaxyCanvas.addLayer(new GalaxyOverlayLayer(fStars));
 
                 galaxyCanvas.fitAll();
                 galaxyCanvas.repaint();
@@ -486,6 +597,25 @@ public class MainFrame extends JFrame {
                 refreshUIFromKB(kb);
                 statusBar.setStatus("Galaxy ready — " + fStars.size() + " stars, "
                         + fSectors.size() + " sectors");
+
+                // Store pipeline data for layout switching (#5)
+                lastNotes         = new ArrayList<>(fNotes);
+                lastNodeDataList  = new ArrayList<>(fNodeDataList);
+                lastNoteToSector  = new HashMap<>(fNoteToSector);
+                lastSectorById    = new HashMap<>(fSectorById);
+                lastPositions     = new HashMap<>(fFinalPositions);
+                lastSectors       = new ArrayList<>(fSectors);
+                lastEdges         = new ArrayList<>(fEdges);
+
+                // Inject NavigatorService into sidebar panel (#4)
+                if (fChatProvider != null) {
+                    try {
+                        OpenAIEmbeddingProvider navEmbedder = new OpenAIEmbeddingProvider();
+                        NavigatorService navService = new RAGNavigator(
+                            navEmbedder, fChatProvider, kb, VectorDatabase.getInstance());
+                        sidebar.getNavigatorPanel().setNavigatorService(navService);
+                    } catch (Exception ignored) { /* no API key — navigator stays disabled */ }
+                }
             });
 
             return null;
@@ -538,6 +668,15 @@ public class MainFrame extends JFrame {
     // File scanner
     // ----------------------------------------------------------------
 
+    private static String readFirst500(String filePath) {
+        try {
+            String content = Files.readString(Path.of(filePath));
+            return content.length() <= 500 ? content : content.substring(0, 500);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     private static List<Path> scanFiles(Path folder) {
         try {
             return Files.walk(folder)
@@ -558,6 +697,76 @@ public class MainFrame extends JFrame {
             System.err.println("ERROR scanning folder: " + e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Layout application
+    // ----------------------------------------------------------------
+
+    /**
+     * Rebuilds all stars/nebulae/layers with the given new positions and
+     * repaints the canvas.  Called on the EDT from the layout-switch SwingWorker.
+     */
+    private void applyNewLayout(Map<String, Vector2D> newPositions) {
+        if (lastNotes == null || newPositions == null || newPositions.isEmpty()) return;
+
+        List<Star> newStars = new ArrayList<>();
+        Map<String, Vector2D> posMap = new HashMap<>();
+        for (Note note : lastNotes) {
+            Vector2D pos = newPositions.getOrDefault(note.getId(),
+                           lastPositions != null ? lastPositions.getOrDefault(note.getId(),
+                                                   new Vector2D(0, 0)) : new Vector2D(0, 0));
+            String sid     = lastNoteToSector.getOrDefault(note.getId(),
+                             lastSectors.isEmpty() ? "" : lastSectors.get(0).getId());
+            Sector sector  = lastSectorById.getOrDefault(sid,
+                             lastSectors.isEmpty() ? null : lastSectors.get(0));
+            if (sector == null) continue;
+            Star star = new Star(note, pos, 8.0, sector);
+            newStars.add(star);
+            posMap.put(note.getId(), pos);
+        }
+
+        // Recompute sector centroids for nebulae
+        for (Sector sector : lastSectors) {
+            List<String> members = sector.getNoteIds();
+            if (members.isEmpty()) continue;
+            double cx = 0, cy = 0;
+            int    cnt = 0;
+            for (String nid : members) {
+                Vector2D p = newPositions.get(nid);
+                if (p != null) { cx += p.getX(); cy += p.getY(); cnt++; }
+            }
+            if (cnt > 0) sector.setCentroid(new Vector2D(cx / cnt, cy / cnt));
+        }
+
+        List<Nebula> newNebulae = new ArrayList<>();
+        for (Sector sector : lastSectors) {
+            Vector2D centroid = sector.getCentroid();
+            if (centroid == null) continue;
+            double maxDist = 50.0;
+            for (String nid : sector.getNoteIds()) {
+                Vector2D p = newPositions.get(nid);
+                if (p != null) maxDist = Math.max(maxDist, centroid.distanceTo(p));
+            }
+            newNebulae.add(new Nebula(sector, centroid, maxDist * 1.5));
+        }
+
+        List<Vector2D> worldPositions = new ArrayList<>(posMap.values());
+        new ArrayList<>(galaxyCanvas.getLayers()).forEach(galaxyCanvas::removeLayer);
+        List<com.docgalaxy.model.celestial.CelestialBody> bodies = new ArrayList<>(newStars);
+        bodies.addAll(newNebulae);
+        galaxyCanvas.setBodies(bodies);
+        galaxyCanvas.setEdges(lastEdges);
+        galaxyCanvas.addLayer(new BackgroundLayer(worldPositions));
+        galaxyCanvas.addLayer(new NebulaLayer(newNebulae));
+        galaxyCanvas.addLayer(new StarLayer(newStars));
+        galaxyCanvas.addLayer(new EdgeLayer(lastEdges, posMap));
+        galaxyCanvas.addLayer(new LabelLayer(newStars));
+        galaxyCanvas.addLayer(new GalaxyOverlayLayer(newStars));
+        galaxyCanvas.fitAll();
+        galaxyCanvas.repaint();
+
+        lastPositions = new HashMap<>(newPositions);
     }
 
     // ----------------------------------------------------------------

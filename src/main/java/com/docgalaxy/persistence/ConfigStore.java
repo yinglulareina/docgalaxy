@@ -136,10 +136,29 @@ public class ConfigStore extends AbstractStore<AppConfig> {
     }
 
     private static String getMachineId() {
+        Path idFile = Path.of(System.getProperty("user.home"), ".docgalaxy-machine-id");
+
+        // 1. Try to read an existing persisted ID
+        if (Files.exists(idFile)) {
+            try {
+                String id = Files.readString(idFile, StandardCharsets.UTF_8).trim();
+                if (!id.isBlank()) return id;
+            } catch (IOException ignored) { }
+        }
+
+        // 2. Generate a new UUID and persist it
+        String newId = java.util.UUID.randomUUID().toString();
+        try {
+            Files.writeString(idFile, newId, StandardCharsets.UTF_8);
+            return newId;
+        } catch (IOException ignored) { }
+
+        // 3. Secondary fallback: hostname
         try {
             return InetAddress.getLocalHost().getHostName();
-        } catch (Exception e) {
-            return "docgalaxy-fallback-machine-id";
-        }
+        } catch (Exception ignored) { }
+
+        // 4. Last resort
+        return "docgalaxy-fallback-machine-id";
     }
 }

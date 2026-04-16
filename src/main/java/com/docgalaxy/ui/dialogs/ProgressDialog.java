@@ -1,6 +1,7 @@
 package com.docgalaxy.ui.dialogs;
 
 import com.docgalaxy.ui.ThemeManager;
+import com.docgalaxy.util.AppConstants;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -53,7 +54,7 @@ public class ProgressDialog extends JDialog {
 
         setContentPane(content);
         pack();
-        setMinimumSize(new Dimension(320, 100));
+        setMinimumSize(new Dimension(AppConstants.PROGRESS_DIALOG_WIDTH, AppConstants.PROGRESS_DIALOG_HEIGHT));
         setLocationRelativeTo(owner);
     }
 
