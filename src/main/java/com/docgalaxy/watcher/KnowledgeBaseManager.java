@@ -60,11 +60,14 @@ public class KnowledgeBaseManager implements FileChangeListener {
     private final IndexStore          indexStore;
     private final PersistenceManager  persistenceManager;
 
-    // Shared vector map – also handed to PersistenceManager and VectorDatabase (Ying)
+    // Shared vector map – also handed to PersistenceManager and VectorDatabase
     private final Map<String, double[]> vectorMap = new ConcurrentHashMap<>();
 
-    // Optional: set once Ying's EmbeddingProvider implementation is wired in
+    // Optional: set once EmbeddingProvider is wired in
     private EmbeddingProvider embeddingProvider;
+
+    // Expected embedding dimension from config; -1 = not set (Case 12)
+    private int expectedDimension = -1;
 
     // Worker pool for background embedding tasks (2 threads)
     private final ExecutorService embeddingWorker =
@@ -74,7 +77,7 @@ public class KnowledgeBaseManager implements FileChangeListener {
             return t;
         });
 
-    // Rename detection: relative path → Note pending deletion
+    // Rename detection: content hash → Note pending deletion
     private final Map<String, Note>     pendingDeletes   = new ConcurrentHashMap<>();
     private final ScheduledExecutorService renameScheduler =
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -105,13 +108,20 @@ public class KnowledgeBaseManager implements FileChangeListener {
     /** Wire in the AI embedding provider once it is available. */
     public void setEmbeddingProvider(EmbeddingProvider provider) {
         this.embeddingProvider = provider;
-        // Share the vector map so PersistenceManager can flush it
         persistenceManager.setCurrentVectors(vectorMap);
     }
 
     /** Register the callback to trigger canvas repaint on the EDT. */
     public void setOnGalaxyRefresh(Consumer<Void> callback) {
         this.onGalaxyRefresh = callback;
+    }
+
+    /**
+     * Set the configured embedding dimension so reconcile() can detect mismatches.
+     * Call before reconcile(). (Case 12)
+     */
+    public void setExpectedDimension(int dim) {
+        this.expectedDimension = dim;
     }
 
     // ----------------------------------------------------------------
@@ -134,6 +144,8 @@ public class KnowledgeBaseManager implements FileChangeListener {
     @Override
     public void onFileCreated(Path path) {
         if (!isWatchedFile(path)) return;
+        // Case 9: skip symlinks
+        if (Files.isSymbolicLink(path)) return;
         try {
             String content = Files.readString(path);
 
@@ -151,7 +163,7 @@ public class KnowledgeBaseManager implements FileChangeListener {
             note.setFileSize(Files.size(path));
             note.setLastModified(Files.getLastModifiedTime(path).toMillis());
 
-            // Content length guard – too short → incubator (tracked but not embedded)
+            // Case 7: too short → incubator
             if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) {
                 note.setStatus(NoteStatus.INCUBATOR);
                 LOGGER.info("File too short for indexing (incubator): " + path.getFileName());
@@ -162,10 +174,10 @@ public class KnowledgeBaseManager implements FileChangeListener {
 
             knowledgeBase.addNote(note);
             persistenceManager.markDirty(PersistenceManager.STORE_INDEX);
-
             enqueueEmbedding(note, content);
 
         } catch (IOException e) {
+            // Case 10: log and skip
             LOGGER.log(Level.WARNING, "Error processing created file: " + path, e);
         }
     }
@@ -173,19 +185,17 @@ public class KnowledgeBaseManager implements FileChangeListener {
     @Override
     public void onFileModified(Path path) {
         if (!isWatchedFile(path)) return;
-        // Note: debouncing is handled by FileWatcher before calling here
+        if (Files.isSymbolicLink(path)) return;   // Case 9
         try {
             String content  = Files.readString(path);
             String relPath  = relativize(path);
             Note   note     = knowledgeBase.getNoteByPath(relPath);
 
             if (note == null) {
-                // Unknown file – treat as new
                 onFileCreated(path);
                 return;
             }
 
-            // Hash guard – skip if content is identical
             String newHash = HashUtil.sha256(content);
             if (newHash.equals(note.getContentHash())) return;
 
@@ -193,9 +203,6 @@ public class KnowledgeBaseManager implements FileChangeListener {
             note.setFileSize(Files.size(path));
             note.setLastModified(Files.getLastModifiedTime(path).toMillis());
             persistenceManager.markDirty(PersistenceManager.STORE_INDEX);
-
-            // Re-embed; drift threshold check (DRIFT_THRESHOLD = 0.95) happens
-            // inside the worker after the new vector is computed.
             enqueueEmbedding(note, content);
 
         } catch (IOException e) {
@@ -211,9 +218,8 @@ public class KnowledgeBaseManager implements FileChangeListener {
         if (note == null) return;
 
         note.setStatus(NoteStatus.PENDING_RENAME);
-        pendingDeletes.put(note.getContentHash(), note);   // key = hash for matching
+        pendingDeletes.put(note.getContentHash(), note);
 
-        // If no matching CREATE arrives within RENAME_TIMEOUT_MS → mark ORPHANED
         renameScheduler.schedule(() -> {
             Note pending = pendingDeletes.remove(note.getContentHash());
             if (pending != null && pending.getStatus() == NoteStatus.PENDING_RENAME) {
@@ -228,11 +234,10 @@ public class KnowledgeBaseManager implements FileChangeListener {
     // Rename detection helpers
     // ----------------------------------------------------------------
 
-    /** Returns the pending-delete Note whose hash matches the new file, or null. */
     private Note matchPendingDelete(String newContent) {
         if (pendingDeletes.isEmpty()) return null;
         String hash = HashUtil.sha256(newContent);
-        return pendingDeletes.remove(hash);   // removes from pending on match
+        return pendingDeletes.remove(hash);
     }
 
     private void handleRename(Note note, Path newPath) {
@@ -257,8 +262,6 @@ public class KnowledgeBaseManager implements FileChangeListener {
             try {
                 double[] newVector = embeddingProvider.embed(content);
 
-                // Drift threshold check: if old vector exists and similarity ≥ 0.95,
-                // update silently without triggering a layout recalculation.
                 double[] oldVector = vectorMap.get(note.getId());
                 boolean driftedFar = true;
                 if (oldVector != null) {
@@ -281,13 +284,254 @@ public class KnowledgeBaseManager implements FileChangeListener {
     }
 
     // ----------------------------------------------------------------
+    // Startup reconciliation — all 13 edge cases
+    // ----------------------------------------------------------------
+
+    /**
+     * Reconciles the persisted index against the actual files on disk.
+     *
+     * <pre>
+     * Case  1  path+hash same, vector present   → reuse UUID+embedding, skip API
+     * Case  2  path+hash different               → reuse UUID, re-embed
+     * Case  3  hash matches exactly 1 orphan     → rename, reuse UUID
+     * Case  4  hash matches multiple orphans     → treat as new (ambiguous)
+     * Case  5  filekey match (rename+modified)   → reuse UUID, re-embed
+     * Case  6  in index, not on disk             → remove record + vector
+     * Case  7  file < 50 chars                   → incubator, no embed
+     * Case  8  only .md/.txt/.markdown files
+     * Case  9  skip symlinks
+     * Case 10  read failure                       → log warning, skip
+     * Case 11  path+hash same but vector missing → re-embed
+     * Case 12  dimension mismatch                → clear vector cache, full re-embed
+     * Case 13  recursive scan, relative paths
+     * </pre>
+     */
+    public void reconcile() {
+        Path rootPath = knowledgeBase.getRootPath();
+
+        // ── Case 12: dimension mismatch check ────────────────────────────────
+        if (expectedDimension > 0 && !vectorMap.isEmpty()) {
+            double[] sample = vectorMap.values().iterator().next();
+            if (sample.length != expectedDimension) {
+                LOGGER.warning("Reconcile: embedding dimension mismatch (stored=" + sample.length
+                    + " configured=" + expectedDimension + ") — clearing vector cache for full re-embed");
+                vectorMap.clear();
+            }
+        }
+
+        // ── Collect all eligible files on disk (Cases 8, 9, 13) ─────────────
+        List<Path> diskFiles = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(rootPath)) {     // Case 13: recursive
+            walk.filter(Files::isRegularFile)
+                .filter(p -> !Files.isSymbolicLink(p))       // Case 9
+                .filter(this::isWatchedFile)                 // Case 8
+                .filter(p -> !p.startsWith(rootPath.resolve(AppConstants.DOT_DIR)))
+                .forEach(diskFiles::add);
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Reconcile: failed to walk directory", e);
+            return;
+        }
+
+        // ── Round 1: exact path match (Cases 1, 2, 7, 10, 11) ───────────────
+        Set<String>  matchedNoteIds = new HashSet<>();
+        List<Path>   unmatchedFiles = new ArrayList<>();
+
+        for (Path file : diskFiles) {
+            String rel  = relativize(file);          // Case 13: store relative path
+            Note   note = knowledgeBase.getNoteByPath(rel);
+
+            if (note == null) {
+                unmatchedFiles.add(file);
+                continue;
+            }
+
+            matchedNoteIds.add(note.getId());
+
+            try {
+                String content = Files.readString(file);   // Case 10: IOException → log
+                String newHash = HashUtil.sha256(content);
+                boolean hashSame      = newHash.equals(note.getContentHash());
+                boolean vectorPresent = vectorMap.containsKey(note.getId()); // Case 11
+
+                note.setFileSize(Files.size(file));
+                note.setLastModified(Files.getLastModifiedTime(file).toMillis());
+
+                if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) {
+                    // Case 7: file shrunk below threshold → move to incubator
+                    note.setStatus(NoteStatus.INCUBATOR);
+                    vectorMap.remove(note.getId());
+                    LOGGER.info("Reconcile: incubator (too short) " + note.getFileName());
+
+                } else if (hashSame && vectorPresent) {
+                    // Case 1: path+hash match, vector present → reuse everything
+                    LOGGER.info("Reconcile: reuse " + note.getFileName() + " (path match)");
+
+                } else {
+                    // Case 2: hash changed  –OR–  Case 11: vector missing
+                    String reason = !hashSame ? "content changed" : "vector missing";
+                    LOGGER.info("Reconcile: re-embed " + note.getFileName() + " (" + reason + ")");
+                    note.setContentHash(newHash);
+                    note.setStatus(NoteStatus.ACTIVE);
+                    enqueueEmbedding(note, content);
+                }
+
+            } catch (IOException e) {
+                // Case 10: log warning and leave note as-is
+                LOGGER.log(Level.WARNING, "Reconcile: failed to read " + file + " — skipping", e);
+            }
+        }
+
+        // ── Build orphan lookup maps ──────────────────────────────────────────
+        Collection<Note> allNotes = new ArrayList<>(knowledgeBase.getAllNotes());
+        List<Note>        orphans  = new ArrayList<>();
+        for (Note note : allNotes) {
+            if (!matchedNoteIds.contains(note.getId())) orphans.add(note);
+        }
+
+        Map<String, Note>       orphanByFileKey = new HashMap<>();
+        Map<String, List<Note>> orphansByHash   = new HashMap<>();  // Cases 3+4
+
+        for (Note orphan : orphans) {
+            if (orphan.getFileKey()     != null)
+                orphanByFileKey.put(orphan.getFileKey(), orphan);
+            if (orphan.getContentHash() != null)
+                orphansByHash.computeIfAbsent(orphan.getContentHash(), k -> new ArrayList<>())
+                             .add(orphan);
+        }
+
+        // ── Round 2: match unmatched files against orphans (Cases 3–5) ───────
+        List<Path> trulyNewFiles = new ArrayList<>();
+
+        for (Path file : unmatchedFiles) {
+            Note   matched     = null;
+            String matchReason = "";
+            String fileContent = null;
+
+            // Check 1: FileKey (OS inode) — strongest signal (Case 5)
+            String fileKey = readFileKey(file);
+            if (fileKey != null) {
+                matched = orphanByFileKey.get(fileKey);
+                if (matched != null) matchReason = "filekey";
+            }
+
+            // Check 2: content hash (Cases 3, 4)
+            if (matched == null) {
+                try {
+                    fileContent = Files.readString(file);
+                    String hash = HashUtil.sha256(fileContent);
+                    List<Note> hashMatches = orphansByHash.getOrDefault(hash, List.of());
+                    if (hashMatches.size() == 1) {
+                        // Case 3: exactly one orphan with this hash → safe rename
+                        matched     = hashMatches.get(0);
+                        matchReason = "hash (unique)";
+                    } else if (hashMatches.size() > 1) {
+                        // Case 4: ambiguous — treat as new to avoid wrong reuse
+                        LOGGER.info("Reconcile: ambiguous hash match for " + relativize(file)
+                            + " (" + hashMatches.size() + " orphans) → new file");
+                    }
+                } catch (IOException e) {
+                    // Case 10: log and skip this file entirely
+                    LOGGER.log(Level.WARNING,
+                        "Reconcile: failed to read " + file + " — skipping", e);
+                    continue;
+                }
+            }
+
+            if (matched != null) {
+                // Remove from orphan tracking
+                orphans.remove(matched);
+                orphanByFileKey.remove(matched.getFileKey());
+                List<Note> hl = orphansByHash.get(matched.getContentHash());
+                if (hl != null) hl.remove(matched);
+
+                // Update identity fields
+                String newRel = relativize(file);
+                matched.setFilePath(newRel);
+                matched.setFileName(file.getFileName().toString());
+                matched.setStatus(NoteStatus.ACTIVE);
+                if (fileKey != null) matched.setFileKey(fileKey);
+                try {
+                    matched.setFileSize(Files.size(file));
+                    matched.setLastModified(Files.getLastModifiedTime(file).toMillis());
+                } catch (IOException ignored) {}
+
+                // Case 5: after rename, check whether content also changed
+                try {
+                    if (fileContent == null) fileContent = Files.readString(file);
+                    String newHash = HashUtil.sha256(fileContent);
+                    if (!newHash.equals(matched.getContentHash())) {
+                        LOGGER.info("Reconcile: re-embed " + matched.getFileName()
+                            + " (renamed via " + matchReason + " + content changed)");
+                        matched.setContentHash(newHash);
+                        enqueueEmbedding(matched, fileContent);
+                    } else {
+                        LOGGER.info("Reconcile: renamed " + matched.getFileName()
+                            + " via " + matchReason + " (content unchanged)");
+                    }
+                } catch (IOException e) {
+                    LOGGER.log(Level.WARNING,
+                        "Reconcile: failed to verify content of renamed " + file, e);
+                }
+
+            } else {
+                trulyNewFiles.add(file);
+            }
+        }
+
+        // ── Case 6: delete index records + vectors for true orphans ──────────
+        for (Note orphan : orphans) {
+            knowledgeBase.removeNote(orphan.getId());
+            vectorMap.remove(orphan.getId());
+            LOGGER.info("Reconcile: deleted (file removed) " + orphan.getFilePath());
+        }
+
+        // ── Create Notes for truly new files ─────────────────────────────────
+        for (Path file : trulyNewFiles) {
+            try {
+                String content = Files.readString(file);
+                String relPath = relativize(file);   // Case 13: relative path
+
+                // Case 7: too short → incubator, no embed
+                if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) {
+                    Note note = new Note(relPath, file.getFileName().toString());
+                    note.setStatus(NoteStatus.INCUBATOR);
+                    note.setContentHash(HashUtil.sha256(content));
+                    knowledgeBase.addNote(note);
+                    LOGGER.info("Reconcile: incubator (too short) " + relPath);
+                    continue;
+                }
+
+                Note note = new Note(relPath, file.getFileName().toString());
+                note.setContentHash(HashUtil.sha256(content));
+                note.setFileKey(readFileKey(file));
+                note.setFileSize(Files.size(file));
+                note.setLastModified(Files.getLastModifiedTime(file).toMillis());
+                knowledgeBase.addNote(note);
+                enqueueEmbedding(note, content);
+                LOGGER.info("Reconcile: new file indexed " + relPath);
+
+            } catch (IOException e) {
+                // Case 10: log and skip
+                LOGGER.log(Level.WARNING,
+                    "Reconcile: failed to process " + file + " — skipping", e);
+            }
+        }
+
+        persistenceManager.markDirty(PersistenceManager.STORE_INDEX);
+        LOGGER.info("Reconcile complete — " + knowledgeBase.getNoteCount() + " notes, "
+            + orphans.size() + " deleted, " + trulyNewFiles.size() + " new");
+    }
+
+    // ----------------------------------------------------------------
     // Utilities
     // ----------------------------------------------------------------
 
-    /** Only process .md and .txt files. */
+    /**
+     * Only process .md, .txt, and .markdown files. (Case 8)
+     */
     private boolean isWatchedFile(Path path) {
         String name = path.getFileName().toString().toLowerCase();
-        return name.endsWith(".md") || name.endsWith(".txt");
+        return name.endsWith(".md") || name.endsWith(".txt") || name.endsWith(".markdown");
     }
 
     private String relativize(Path absolute) {
@@ -298,9 +542,19 @@ public class KnowledgeBaseManager implements FileChangeListener {
         }
     }
 
-    /** Inline cosine similarity (avoids importing VectorMath to keep the
-     *  dependency graph simple – this class doesn't need to import the whole
-     *  util package just for one operation). */
+    /** Read the OS-level file key (inode on Unix). Returns null if unavailable. */
+    private static String readFileKey(Path path) {
+        try {
+            BasicFileAttributes attrs =
+                Files.readAttributes(path, BasicFileAttributes.class);
+            Object key = attrs.fileKey();
+            return key != null ? key.toString() : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** Inline cosine similarity (avoids importing VectorMath). */
     private static double cosineSimilarity(double[] a, double[] b) {
         double dot = 0, na = 0, nb = 0;
         for (int i = 0; i < a.length; i++) {
@@ -318,156 +572,6 @@ public class KnowledgeBaseManager implements FileChangeListener {
 
     public KnowledgeBase getKnowledgeBase() { return knowledgeBase; }
 
-    /** Exposes the live vector map so Ying's VectorDatabase can be seeded from it. */
+    /** Exposes the live vector map so VectorDatabase can be seeded from it. */
     public Map<String, double[]> getVectorMap() { return vectorMap; }
-
-    // ----------------------------------------------------------------
-    // Startup reconciliation (3-round matching)
-    // ----------------------------------------------------------------
-
-    /**
-     * Reconciles the persisted index against the actual files on disk.
-     * Called once after loadPersistedIndex(), before starting FileWatcher.
-     *
-     * Round 1 – exact path match
-     * Round 2 – FileKey (OS inode) match  →  hash match  →  size+mtime match
-     * Remaining unmatched files → new Notes (enqueue embedding)
-     * Remaining orphaned records → mark ORPHANED
-     */
-    public void reconcile() {
-        Path rootPath = knowledgeBase.getRootPath();
-
-        // ---- Collect all files on disk ----
-        List<Path> diskFiles = new ArrayList<>();
-        try (Stream<Path> walk = Files.walk(rootPath)) {
-            walk.filter(Files::isRegularFile)
-                .filter(this::isWatchedFile)
-                .filter(p -> !p.startsWith(rootPath.resolve(AppConstants.DOT_DIR)))
-                .forEach(diskFiles::add);
-        } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Reconciliation: failed to walk directory", e);
-            return;
-        }
-
-        // ---- Round 1: exact path match ----
-        Set<String>   matchedNoteIds = new HashSet<>();
-        List<Path>    unmatchedFiles = new ArrayList<>();
-
-        for (Path file : diskFiles) {
-            String rel  = relativize(file);
-            Note   note = knowledgeBase.getNoteByPath(rel);
-            if (note != null) {
-                matchedNoteIds.add(note.getId());
-                // Refresh mtime / size in case they drifted
-                try {
-                    note.setFileSize(Files.size(file));
-                    note.setLastModified(Files.getLastModifiedTime(file).toMillis());
-                } catch (IOException ignored) {}
-            } else {
-                unmatchedFiles.add(file);
-            }
-        }
-
-        // Orphaned = in index but NOT on disk after round 1
-        Collection<Note> allNotes   = new ArrayList<>(knowledgeBase.getAllNotes());
-        List<Note>        orphans   = new ArrayList<>();
-        for (Note note : allNotes) {
-            if (!matchedNoteIds.contains(note.getId())) {
-                orphans.add(note);
-            }
-        }
-
-        // ---- Round 2: match unmatched files against orphaned records ----
-        // Build lookup maps for fast matching
-        Map<String, Note> orphanByFileKey = new HashMap<>();
-        Map<String, Note> orphanByHash    = new HashMap<>();
-
-        for (Note orphan : orphans) {
-            if (orphan.getFileKey()     != null) orphanByFileKey.put(orphan.getFileKey(), orphan);
-            if (orphan.getContentHash() != null) orphanByHash.put(orphan.getContentHash(), orphan);
-        }
-
-        List<Path> trulyNewFiles = new ArrayList<>();
-
-        for (Path file : unmatchedFiles) {
-            Note matched = null;
-
-            // Check 1: FileKey (OS inode) – strongest signal
-            String fileKey = readFileKey(file);
-            if (fileKey != null) matched = orphanByFileKey.get(fileKey);
-
-            // Check 2: content hash – high confidence
-            if (matched == null) {
-                try {
-                    String hash = HashUtil.sha256(Files.readString(file));
-                    matched = orphanByHash.get(hash);
-                } catch (IOException ignored) {}
-            }
-
-            if (matched != null) {
-                // It's a rename/move – update the record
-                orphans.remove(matched);
-                orphanByFileKey.remove(matched.getFileKey());
-                orphanByHash.remove(matched.getContentHash());
-
-                matched.setFilePath(relativize(file));
-                matched.setFileName(file.getFileName().toString());
-                matched.setStatus(NoteStatus.ACTIVE);
-                if (fileKey != null) matched.setFileKey(fileKey);
-                try {
-                    matched.setFileSize(Files.size(file));
-                    matched.setLastModified(Files.getLastModifiedTime(file).toMillis());
-                } catch (IOException ignored) {}
-
-                LOGGER.info("Reconcile: renamed/moved note detected → " + matched.getFilePath());
-            } else {
-                trulyNewFiles.add(file);
-            }
-        }
-
-        // ---- Mark remaining orphans ----
-        for (Note orphan : orphans) {
-            orphan.setStatus(NoteStatus.ORPHANED);
-            LOGGER.info("Reconcile: orphaned note → " + orphan.getFilePath());
-        }
-
-        // ---- Create new Notes for truly new files ----
-        for (Path file : trulyNewFiles) {
-            try {
-                String content = Files.readString(file);
-                if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) continue;
-
-                String relPath = relativize(file);
-                Note   note    = new Note(relPath, file.getFileName().toString());
-                note.setContentHash(HashUtil.sha256(content));
-                note.setFileKey(readFileKey(file));
-                note.setFileSize(Files.size(file));
-                note.setLastModified(Files.getLastModifiedTime(file).toMillis());
-
-                knowledgeBase.addNote(note);
-                enqueueEmbedding(note, content);
-                LOGGER.info("Reconcile: new file indexed → " + relPath);
-            } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Reconcile: failed to process " + file, e);
-            }
-        }
-
-        persistenceManager.markDirty(PersistenceManager.STORE_INDEX);
-        LOGGER.info("Reconciliation complete – "
-            + knowledgeBase.getNoteCount() + " notes, "
-            + orphans.size() + " orphaned, "
-            + trulyNewFiles.size() + " new");
-    }
-
-    /** Read the OS-level file key (inode on Unix). Returns null if unavailable. */
-    private static String readFileKey(Path path) {
-        try {
-            BasicFileAttributes attrs =
-                Files.readAttributes(path, BasicFileAttributes.class);
-            Object key = attrs.fileKey();
-            return key != null ? key.toString() : null;
-        } catch (IOException e) {
-            return null;
-        }
-    }
 }
