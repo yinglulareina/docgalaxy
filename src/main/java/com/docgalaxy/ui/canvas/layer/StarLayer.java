@@ -50,10 +50,10 @@ import java.util.List;
 public final class StarLayer implements RenderLayer {
 
     /** Zoom multiplier for the outer edge of the glow ring. */
-    static final double GLOW_RADIUS_FACTOR = 3.0;
+    static final double GLOW_RADIUS_FACTOR = 4.0;
 
     /** Peak alpha value for the glow (0-255). */
-    static final int GLOW_ALPHA = 40;
+    static final int GLOW_ALPHA = 80;
 
     /** Width of the label fade-in window above {@link AppConstants#LABEL_SHOW_THRESHOLD}. */
     static final double LABEL_FADE_RANGE = 0.2;
@@ -62,7 +62,7 @@ public final class StarLayer implements RenderLayer {
     static final double LOD_PIXEL_MAX    = 2.0;
 
     /** Screen-radius boundary below which only a simple circle is drawn. */
-    static final double LOD_SIMPLE_MAX   = 5.0;
+    static final double LOD_SIMPLE_MAX   = 3.0;
 
     private final List<Star> stars;
 
@@ -214,7 +214,7 @@ public final class StarLayer implements RenderLayer {
         Color bodyEdge = sectorColor.darker();
         RadialGradientPaint bodyPaint = new RadialGradientPaint(
                 centre, bodyR,
-                new float[]{0f, 0.5f, 1f},
+                new float[]{0f, 0.3f, 1f},
                 new Color[]{Color.WHITE, sectorColor, bodyEdge},
                 MultipleGradientPaint.CycleMethod.NO_CYCLE);
         g.setPaint(bodyPaint);
