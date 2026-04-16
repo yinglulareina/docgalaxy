@@ -1,10 +1,33 @@
 package com.docgalaxy.ui;
 
+import com.docgalaxy.ai.AIServiceException;
+import com.docgalaxy.ai.ChatResponse;
+import com.docgalaxy.ai.Neighbor;
+import com.docgalaxy.ai.OpenAIChatProvider;
+import com.docgalaxy.ai.OpenAIEmbeddingProvider;
+import com.docgalaxy.ai.VectorDatabase;
+import com.docgalaxy.ai.cluster.Cluster;
+import com.docgalaxy.ai.cluster.HybridClusterStrategy;
+import com.docgalaxy.layout.DimensionReducer;
+import com.docgalaxy.layout.ForceDirectedLayout;
+import com.docgalaxy.layout.NodeData;
+import com.docgalaxy.model.Edge;
 import com.docgalaxy.model.KnowledgeBase;
+import com.docgalaxy.model.Note;
+import com.docgalaxy.model.Sector;
+import com.docgalaxy.model.Vector2D;
+import com.docgalaxy.model.celestial.CelestialBody;
+import com.docgalaxy.model.celestial.Nebula;
+import com.docgalaxy.model.celestial.Star;
 import com.docgalaxy.persistence.EmbeddingStore;
 import com.docgalaxy.persistence.IndexStore;
 import com.docgalaxy.persistence.PersistenceManager;
 import com.docgalaxy.ui.canvas.GalaxyCanvas;
+import com.docgalaxy.ui.canvas.layer.BackgroundLayer;
+import com.docgalaxy.ui.canvas.layer.EdgeLayer;
+import com.docgalaxy.ui.canvas.layer.LabelLayer;
+import com.docgalaxy.ui.canvas.layer.NebulaLayer;
+import com.docgalaxy.ui.canvas.layer.StarLayer;
 import com.docgalaxy.ui.components.Sidebar;
 import com.docgalaxy.ui.components.StatusBar;
 import com.docgalaxy.ui.components.ToolBar;
@@ -17,7 +40,18 @@ import com.docgalaxy.watcher.KnowledgeBaseManager;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.Color;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -95,7 +129,6 @@ public class MainFrame extends JFrame {
     // ----------------------------------------------------------------
 
     private void wireSidebar() {
-        // Search → highlight matching notes on canvas
         sidebar.setOnSearch(query -> {
             if (kbManager == null) return;
             KnowledgeBase kb = kbManager.getKnowledgeBase();
@@ -110,16 +143,13 @@ public class MainFrame extends JFrame {
 
         sidebar.setOnSearchClear(galaxyCanvas::clearHighlight);
 
-        // Sector click → update status bar
         sidebar.setOnSectorSelected(sector ->
             statusBar.setStatus("Sector: " + sector.getLabel()));
 
-        // Incubator note click → update status bar
         sidebar.setOnIncubatorNoteSelected(note ->
             statusBar.setStatus("Incubator: " + note.getFileName()
                 + " (add more content to index)"));
 
-        // Navigator highlight → pass to canvas
         sidebar.setOnNavigatorHighlight(galaxyCanvas::highlightNotes);
     }
 
@@ -144,8 +174,7 @@ public class MainFrame extends JFrame {
         toolBar.setOnSettings(() -> {
             if (currentStoreDir != null) {
                 SettingsDialog dlg = new SettingsDialog(this, currentStoreDir);
-                dlg.setOnSaved(cfg ->
-                    statusBar.setStatus("Settings saved"));
+                dlg.setOnSaved(cfg -> statusBar.setStatus("Settings saved"));
                 dlg.setVisible(true);
             } else {
                 JOptionPane.showMessageDialog(this,
@@ -159,7 +188,11 @@ public class MainFrame extends JFrame {
     // Knowledge base operations
     // ----------------------------------------------------------------
 
-    /** Open (or re-open) a knowledge base folder. */
+    /**
+     * Opens a knowledge base folder and runs the full AI pipeline:
+     * scan → batchEmbed → PCA → clustering → LLM sector names →
+     * ForceDirectedLayout → build Star/Nebula/Edge → populate canvas.
+     */
     public void openKnowledgeBase(Path rootPath) {
         currentStoreDir = rootPath.resolve(AppConstants.DOT_DIR);
 
@@ -176,8 +209,10 @@ public class MainFrame extends JFrame {
         kbManager.setOnGalaxyRefresh(ignored ->
             SwingUtilities.invokeLater(() -> refreshUIFromKB(kb)));
 
-        refreshUIFromKB(kb);
-        statusBar.setStatus("Opened: " + rootPath.getFileName());
+        statusBar.setStatus("Opened: " + rootPath.getFileName() + " — building galaxy…");
+
+        // Run the heavy pipeline off the EDT
+        new PipelineWorker(rootPath, kb).execute();
     }
 
     /** Load the bundled demo knowledge base from classpath resources. */
@@ -197,8 +232,7 @@ public class MainFrame extends JFrame {
                 try {
                     Path demoRoot = get();
                     openKnowledgeBase(demoRoot);
-                    statusBar.setStatus("Demo knowledge base loaded – " +
-                        kbManager.getKnowledgeBase().getNoteCount() + " notes");
+                    statusBar.setStatus("Demo knowledge base loaded");
                 } catch (Exception ex) {
                     LOGGER.log(Level.WARNING, "Failed to load demo KB", ex);
                     statusBar.setStatus("Failed to load demo: " + ex.getMessage());
@@ -206,6 +240,324 @@ public class MainFrame extends JFrame {
             }
         };
         worker.execute();
+    }
+
+    // ----------------------------------------------------------------
+    // AI Pipeline SwingWorker
+    // ----------------------------------------------------------------
+
+    private final class PipelineWorker extends SwingWorker<Void, Void> {
+
+        private final Path          folder;
+        private final KnowledgeBase kb;
+
+        PipelineWorker(Path folder, KnowledgeBase kb) {
+            this.folder = folder;
+            this.kb     = kb;
+        }
+
+        @Override
+        protected Void doInBackground() {
+            long pipelineStart = System.currentTimeMillis();
+
+            List<Path> files = scanFiles(folder);
+            if (files.isEmpty()) {
+                System.out.println("No eligible .md/.txt files found.");
+                return null;
+            }
+            System.out.println("Scanning complete: " + files.size() + " files to embed.");
+
+            OpenAIEmbeddingProvider embedder;
+            try {
+                embedder = new OpenAIEmbeddingProvider();
+            } catch (IllegalStateException e) {
+                System.err.println("ERROR: " + e.getMessage() + " — set OPENAI_API_KEY.");
+                SwingUtilities.invokeLater(() ->
+                    statusBar.setStatus("Missing OPENAI_API_KEY — cannot build galaxy."));
+                return null;
+            }
+
+            OpenAIChatProvider chatProvider = null;
+            try { chatProvider = new OpenAIChatProvider(); }
+            catch (IllegalStateException ignored) { }
+
+            VectorDatabase db = VectorDatabase.getInstance();
+            db.clear();
+
+            List<Note>   pendingNotes    = new ArrayList<>();
+            List<String> pendingContents = new ArrayList<>();
+            for (Path file : files) {
+                try {
+                    pendingNotes.add(new Note(file.toAbsolutePath().toString(),
+                                              file.getFileName().toString()));
+                    pendingContents.add(Files.readString(file));
+                } catch (IOException e) {
+                    System.err.println("  Skipping unreadable: " + file.getFileName());
+                }
+            }
+
+            final int BATCH = 20;
+            List<Note>     notes   = new ArrayList<>();
+            List<double[]> vectors = new ArrayList<>();
+            int total = pendingNotes.size();
+
+            long embedStart = System.currentTimeMillis();
+            for (int start = 0; start < total; start += BATCH) {
+                int end = Math.min(start + BATCH, total);
+                System.out.println("Embedding " + (start + 1) + "-" + end + "/" + total + "…");
+                try {
+                    List<String>   batch   = pendingContents.subList(start, end);
+                    List<double[]> results = embedder.batchEmbed(batch);
+                    for (int i = 0; i < results.size(); i++) {
+                        Note note = pendingNotes.get(start + i);
+                        db.add(note.getId(), results.get(i));
+                        notes.add(note);
+                        vectors.add(results.get(i));
+                    }
+                } catch (AIServiceException e) {
+                    System.err.println("  Batch error: " + e.getMessage());
+                }
+            }
+            System.out.printf("Embedding: %dms (%d files)%n",
+                    System.currentTimeMillis() - embedStart, notes.size());
+
+            if (notes.isEmpty()) return null;
+
+            // PCA
+            long pcaStart = System.currentTimeMillis();
+            DimensionReducer reducer = new DimensionReducer();
+            reducer.fit(vectors);
+            List<Vector2D> points2D = reducer.transformAll(vectors);
+            System.out.printf("PCA: %dms%n", System.currentTimeMillis() - pcaStart);
+
+            Map<String, Vector2D> pcaPositions = new LinkedHashMap<>();
+            for (int i = 0; i < notes.size(); i++) {
+                pcaPositions.put(notes.get(i).getId(), points2D.get(i));
+            }
+
+            // Clustering
+            long clusterStart = System.currentTimeMillis();
+            List<String>          noteIds   = notes.stream().map(Note::getId).collect(Collectors.toList());
+            HybridClusterStrategy clusterer = new HybridClusterStrategy();
+            List<Cluster>         clusters  = clusterer.cluster(points2D, noteIds);
+            System.out.printf("Clustering: %dms (%d sectors)%n",
+                    System.currentTimeMillis() - clusterStart, clusters.size());
+
+            Map<String, String> noteIdToFileName = new HashMap<>();
+            for (Note note : notes) noteIdToFileName.put(note.getId(), note.getFileName());
+
+            List<Sector>        sectors      = new ArrayList<>();
+            Map<String, String> noteToSector = new HashMap<>();
+            Map<String, Sector> sectorById   = new HashMap<>();
+            Set<String>         usedLabels   = new HashSet<>();
+
+            for (int i = 0; i < clusters.size(); i++) {
+                Cluster cluster  = clusters.get(i);
+                String  sectorId = "sector-" + i;
+                Color   color    = ThemeManager.getSectorColor(i);
+
+                List<String> memberFileNames = cluster.getMemberNoteIds().stream()
+                        .map(id -> noteIdToFileName.getOrDefault(id, id))
+                        .collect(Collectors.toList());
+
+                String label = labelClusterLLM(memberFileNames, chatProvider, usedLabels, i);
+                usedLabels.add(label);
+
+                Sector sector = new Sector(sectorId, label, color);
+                sector.setNoteIds(new ArrayList<>(cluster.getMemberNoteIds()));
+                sector.setCentroid(cluster.getCentroid());
+                sector.setDendrogram(cluster.getDendrogram());
+                sectors.add(sector);
+                sectorById.put(sectorId, sector);
+                for (String nid : cluster.getMemberNoteIds()) noteToSector.put(nid, sectorId);
+            }
+
+            String fallbackSectorId = sectors.isEmpty() ? null : sectors.get(0).getId();
+
+            // KNN + ForceDirected layout
+            List<NodeData> nodeDataList = new ArrayList<>();
+            for (int i = 0; i < notes.size(); i++) {
+                Note   note    = notes.get(i);
+                Vector2D initPos = pcaPositions.get(note.getId());
+                String   sid     = noteToSector.getOrDefault(note.getId(), fallbackSectorId);
+                List<Neighbor> knn = db.searchTopK(vectors.get(i), AppConstants.KNN_K + 1)
+                        .stream()
+                        .filter(n -> !n.getNoteId().equals(note.getId()))
+                        .limit(AppConstants.KNN_K)
+                        .collect(Collectors.toList());
+                nodeDataList.add(new NodeData(note.getId(), initPos, sid, knn));
+            }
+
+            long layoutStart = System.currentTimeMillis();
+            ForceDirectedLayout layout         = new ForceDirectedLayout();
+            Map<String, Vector2D> finalPositions = layout.calculate(nodeDataList);
+            System.out.printf("Layout: %dms (%d iterations)%n",
+                    System.currentTimeMillis() - layoutStart,
+                    layout.getLastIterationCount());
+
+            // Build scene objects
+            List<Star>        stars    = new ArrayList<>();
+            Map<String, Star> starById = new HashMap<>();
+            for (Note note : notes) {
+                Vector2D pos    = finalPositions.getOrDefault(note.getId(), pcaPositions.get(note.getId()));
+                String   sid    = noteToSector.getOrDefault(note.getId(), fallbackSectorId);
+                Sector   sector = sectorById.getOrDefault(sid, sectors.get(0));
+                Star     star   = new Star(note, pos, 8.0, sector);
+                stars.add(star);
+                starById.put(note.getId(), star);
+            }
+
+            for (Sector sector : sectors) {
+                List<String> members = sector.getNoteIds();
+                if (members.isEmpty()) continue;
+                double cx = 0, cy = 0;
+                for (String nid : members) {
+                    Vector2D p = finalPositions.getOrDefault(nid, pcaPositions.get(nid));
+                    if (p != null) { cx += p.getX(); cy += p.getY(); }
+                }
+                sector.setCentroid(new Vector2D(cx / members.size(), cy / members.size()));
+            }
+
+            List<Nebula> nebulae = new ArrayList<>();
+            for (Sector sector : sectors) {
+                Vector2D centroid = sector.getCentroid();
+                if (centroid == null) continue;
+                double maxDist = 50.0;
+                for (String nid : sector.getNoteIds()) {
+                    Vector2D p = finalPositions.getOrDefault(nid, pcaPositions.get(nid));
+                    if (p != null) maxDist = Math.max(maxDist, centroid.distanceTo(p));
+                }
+                nebulae.add(new Nebula(sector, centroid, maxDist * 1.5));
+            }
+
+            List<Edge>  edges     = new ArrayList<>();
+            Set<String> seenEdges = new HashSet<>();
+            for (int i = 0; i < notes.size(); i++) {
+                Note note = notes.get(i);
+                for (Neighbor neighbor : db.searchTopK(vectors.get(i), AppConstants.KNN_K + 1)) {
+                    if (neighbor.getNoteId().equals(note.getId())) continue;
+                    String a   = note.getId().compareTo(neighbor.getNoteId()) < 0
+                                 ? note.getId() : neighbor.getNoteId();
+                    String b   = a.equals(note.getId()) ? neighbor.getNoteId() : note.getId();
+                    String key = a + ":" + b;
+                    if (seenEdges.add(key)) {
+                        edges.add(new Edge(note.getId(), neighbor.getNoteId(),
+                                           neighbor.getSimilarity()));
+                    }
+                }
+            }
+
+            System.out.printf("Total pipeline: %dms — %d stars, %d nebulae, %d edges%n",
+                    System.currentTimeMillis() - pipelineStart,
+                    stars.size(), nebulae.size(), edges.size());
+
+            final List<Star>   fStars   = stars;
+            final List<Nebula> fNebulae = nebulae;
+            final List<Edge>   fEdges   = edges;
+            final List<Sector> fSectors = sectors;
+
+            SwingUtilities.invokeLater(() -> {
+                // Clear old layers
+                new ArrayList<>(galaxyCanvas.getLayers()).forEach(galaxyCanvas::removeLayer);
+
+                List<Vector2D> worldPositions = new ArrayList<>();
+                for (Star s : fStars) worldPositions.add(s.getPosition());
+
+                Map<String, Vector2D> posMap = new HashMap<>();
+                for (Star s : fStars) posMap.put(s.getId(), s.getPosition());
+
+                List<CelestialBody> bodies = new ArrayList<>(fStars);
+                bodies.addAll(fNebulae);
+                galaxyCanvas.setBodies(bodies);
+                galaxyCanvas.setEdges(fEdges);
+
+                galaxyCanvas.addLayer(new BackgroundLayer(worldPositions));
+                galaxyCanvas.addLayer(new NebulaLayer(fNebulae));
+                galaxyCanvas.addLayer(new StarLayer(fStars));
+                galaxyCanvas.addLayer(new EdgeLayer(fEdges, posMap));
+                galaxyCanvas.addLayer(new LabelLayer(fStars));
+
+                galaxyCanvas.fitAll();
+                galaxyCanvas.repaint();
+
+                // Sync KB with pipeline results
+                kb.setSectors(fSectors);
+                for (Star s : fStars) kb.addNote(s.getNote());
+                refreshUIFromKB(kb);
+                statusBar.setStatus("Galaxy ready — " + fStars.size() + " stars, "
+                        + fSectors.size() + " sectors");
+            });
+
+            return null;
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Cluster label helpers
+    // ----------------------------------------------------------------
+
+    static String labelClusterLLM(List<String> memberFileNames,
+                                   OpenAIChatProvider chatProvider,
+                                   Set<String> usedLabels,
+                                   int index) {
+        if (memberFileNames.isEmpty()) return "Cluster " + (index + 1);
+
+        String fileList     = String.join(", ", memberFileNames);
+        String systemPrompt = "You are naming a topic cluster in a knowledge base.";
+
+        if (chatProvider != null) {
+            String userPrompt = "The cluster contains these notes: " + fileList
+                    + ". Give this cluster a short descriptive name, 2-4 words in English."
+                    + " Output only the name, nothing else.";
+            try {
+                ChatResponse resp = chatProvider.chatWithSystem(systemPrompt, userPrompt);
+                if (resp.isSuccess() && resp.getContent() != null && !resp.getContent().isBlank()) {
+                    String label = resp.getContent().trim();
+                    if (!usedLabels.contains(label)) return label;
+
+                    String usedList   = String.join(", ", usedLabels);
+                    String retryPrompt = userPrompt
+                            + " The name must be different from: " + usedList
+                            + ". Focus on what makes this cluster unique.";
+                    ChatResponse resp2 = chatProvider.chatWithSystem(systemPrompt, retryPrompt);
+                    if (resp2.isSuccess() && resp2.getContent() != null
+                            && !resp2.getContent().isBlank()) {
+                        String label2 = resp2.getContent().trim();
+                        if (!usedLabels.contains(label2)) return label2;
+                    }
+                }
+            } catch (AIServiceException e) {
+                System.err.println("  Sector LLM failed: " + e.getMessage() + " — fallback.");
+            }
+        }
+
+        return memberFileNames.stream().limit(3).collect(Collectors.joining(", "));
+    }
+
+    // ----------------------------------------------------------------
+    // File scanner
+    // ----------------------------------------------------------------
+
+    private static List<Path> scanFiles(Path folder) {
+        try {
+            return Files.walk(folder)
+                    .filter(p -> {
+                        String name = p.getFileName().toString().toLowerCase();
+                        return name.endsWith(".md") || name.endsWith(".txt");
+                    })
+                    .filter(p -> {
+                        try {
+                            return Files.readString(p).length() >= AppConstants.MIN_CONTENT_LENGTH;
+                        } catch (IOException e) {
+                            return false;
+                        }
+                    })
+                    .sorted()
+                    .collect(Collectors.toList());
+        } catch (IOException e) {
+            System.err.println("ERROR scanning folder: " + e.getMessage());
+            return Collections.emptyList();
+        }
     }
 
     // ----------------------------------------------------------------
@@ -235,9 +587,10 @@ public class MainFrame extends JFrame {
     // Accessors
     // ----------------------------------------------------------------
 
-    public GalaxyCanvas          getGalaxyCanvas()       { return galaxyCanvas; }
-    public StatusBar             getStatusBar()          { return statusBar; }
-    public Sidebar               getSidebar()            { return sidebar; }
-    public KnowledgeBaseManager  getKbManager()          { return kbManager; }
-    public PersistenceManager    getPersistenceManager() { return persistenceManager; }
+    public GalaxyCanvas          getCanvas()              { return galaxyCanvas; }
+    public GalaxyCanvas          getGalaxyCanvas()        { return galaxyCanvas; }
+    public StatusBar             getStatusBar()           { return statusBar; }
+    public Sidebar               getSidebar()             { return sidebar; }
+    public KnowledgeBaseManager  getKbManager()           { return kbManager; }
+    public PersistenceManager    getPersistenceManager()  { return persistenceManager; }
 }
