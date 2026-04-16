@@ -255,9 +255,6 @@ public final class CanvasInteractionHandler extends MouseAdapter
         String cached = edge.getRelationDescription();
         String displayText = (cached != null) ? cached : "Analyzing relationship…";
 
-        System.out.println("[EDGE DEBUG] Display text: [" + displayText + "]");
-        System.out.println("[EDGE DEBUG] Display text length: " + displayText.length());
-
         previewCard.showEdge(edge, nameA, nameB, displayText,
                              midX, midY, canvas.getWidth(), canvas.getHeight());
 
@@ -281,7 +278,6 @@ public final class CanvasInteractionHandler extends MouseAdapter
                         previewCard.revalidate();
                         previewCard.repaint();
                         canvas.repaint();
-                        System.out.println("[EDGE DEBUG] Card updated with: " + edge.getRelationDescription());
                     }
                 } catch (Exception ignored) { /* worker cancelled or failed */ }
             }
@@ -309,13 +305,8 @@ public final class CanvasInteractionHandler extends MouseAdapter
                         + "Describe their relationship in exactly one complete English sentence,"
                         + " no more than 30 words. Output only the sentence.";
 
-                System.out.println("[EDGE DEBUG] Prompt: " + prompt);
-
                 // Use a SwingWorker future with 5-second timeout via direct call (already off EDT)
                 ChatResponse resp = chatProvider.chat(prompt);
-                System.out.println("[EDGE DEBUG] Response success: " + resp.isSuccess());
-                System.out.println("[EDGE DEBUG] Response content: [" + resp.getContent() + "]");
-                System.out.println("[EDGE DEBUG] Tokens used: " + resp.getTokensUsed());
                 if (resp.isSuccess() && resp.getContent() != null && !resp.getContent().isBlank()) {
                     return resp.getContent().trim();
                 }
