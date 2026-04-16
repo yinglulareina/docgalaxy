@@ -144,18 +144,21 @@ public class KnowledgeBaseManager implements FileChangeListener {
                 return;
             }
 
-            // Content length guard – too short → incubator
-            if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) {
-                LOGGER.info("File too short for indexing (incubator): " + path.getFileName());
-                return;
-            }
-
             // New note
             String relPath = relativize(path);
             Note note = new Note(relPath, path.getFileName().toString());
             note.setContentHash(HashUtil.sha256(content));
             note.setFileSize(Files.size(path));
             note.setLastModified(Files.getLastModifiedTime(path).toMillis());
+
+            // Content length guard – too short → incubator (tracked but not embedded)
+            if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) {
+                note.setStatus(NoteStatus.INCUBATOR);
+                LOGGER.info("File too short for indexing (incubator): " + path.getFileName());
+                knowledgeBase.addNote(note);
+                persistenceManager.markDirty(PersistenceManager.STORE_INDEX);
+                return;
+            }
 
             knowledgeBase.addNote(note);
             persistenceManager.markDirty(PersistenceManager.STORE_INDEX);

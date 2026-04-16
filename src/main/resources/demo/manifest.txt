@@ -1,0 +1,23 @@
+# DocGalaxy Demo Knowledge Base – manifest
+# Lines starting with # are comments; blank lines are ignored.
+
+# Machine Learning
+ml_intro.md
+neural_networks.md
+training_tips.md
+overfitting.md
+transformers.md
+
+# Software Engineering
+clean_code.md
+design_patterns.md
+microservices.md
+api_design.md
+testing_strategies.md
+
+# Philosophy of Mind
+consciousness.md
+free_will.md
+mind_body_problem.md
+perception_reality.md
+language_and_thought.md

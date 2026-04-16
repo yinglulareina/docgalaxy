@@ -5,20 +5,22 @@ import com.docgalaxy.persistence.EmbeddingStore;
 import com.docgalaxy.persistence.IndexStore;
 import com.docgalaxy.persistence.PersistenceManager;
 import com.docgalaxy.ui.canvas.GalaxyCanvas;
+import com.docgalaxy.ui.components.Sidebar;
 import com.docgalaxy.ui.components.StatusBar;
 import com.docgalaxy.ui.components.ToolBar;
+import com.docgalaxy.ui.dialogs.ProgressDialog;
+import com.docgalaxy.ui.dialogs.SettingsDialog;
 import com.docgalaxy.ui.dialogs.WelcomeOverlay;
 import com.docgalaxy.util.AppConstants;
+import com.docgalaxy.util.DemoLoader;
 import com.docgalaxy.watcher.KnowledgeBaseManager;
 
-import javax.swing.BorderFactory;
-import javax.swing.JFrame;
-import javax.swing.JPanel;
-import javax.swing.JSplitPane;
-import javax.swing.SwingUtilities;
-import java.awt.BorderLayout;
-import java.awt.Dimension;
+import javax.swing.*;
+import java.awt.*;
 import java.nio.file.Path;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
  * Root application window (1400 × 900).
@@ -27,25 +29,21 @@ import java.nio.file.Path;
  *   NORTH  → ToolBar
  *   CENTER → JSplitPane( Sidebar [240px] | GalaxyCanvas )
  *   SOUTH  → StatusBar
- *
- * Phase 2 wiring (Yongxuan Day 4-6):
- *   - Replace sidebarPlaceholder with the real Sidebar
- *   - Wire ToolBar callbacks → KnowledgeBaseManager / LayoutManager
- *   - Wire NavigatorPanel → RAGNavigator → GalaxyCanvas
  */
 public class MainFrame extends JFrame {
+
+    private static final Logger LOGGER = Logger.getLogger(MainFrame.class.getName());
 
     // Core UI components
     private final GalaxyCanvas galaxyCanvas;
     private final ToolBar      toolBar;
     private final StatusBar    statusBar;
-
-    // Sidebar placeholder – replaced by Sidebar in Phase 2
-    private final JPanel sidebarPlaceholder;
+    private final Sidebar      sidebar;
 
     // Backend services – initialised when a KB is opened
     private KnowledgeBaseManager kbManager;
     private PersistenceManager   persistenceManager;
+    private Path                 currentStoreDir;
 
     // ----------------------------------------------------------------
     // Construction
@@ -54,19 +52,19 @@ public class MainFrame extends JFrame {
     public MainFrame() {
         super("DocGalaxy");
 
-        galaxyCanvas      = new GalaxyCanvas();
-        toolBar           = new ToolBar();
-        statusBar         = new StatusBar();
-        sidebarPlaceholder = buildSidebarPlaceholder();
+        galaxyCanvas = new GalaxyCanvas();
+        toolBar      = new ToolBar();
+        statusBar    = new StatusBar();
+        sidebar      = new Sidebar();
 
         setupLayout();
+        wireSidebar();
         wireToolBar();
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(AppConstants.DEFAULT_WINDOW_WIDTH, AppConstants.DEFAULT_WINDOW_HEIGHT);
         setLocationRelativeTo(null);
 
-        // Show welcome overlay after the frame is visible
         SwingUtilities.invokeLater(this::showWelcomeOverlay);
     }
 
@@ -80,7 +78,7 @@ public class MainFrame extends JFrame {
 
         JSplitPane split = new JSplitPane(
             JSplitPane.HORIZONTAL_SPLIT,
-            sidebarPlaceholder,
+            sidebar,
             galaxyCanvas
         );
         split.setDividerLocation(AppConstants.SIDEBAR_WIDTH);
@@ -92,14 +90,37 @@ public class MainFrame extends JFrame {
         add(statusBar, BorderLayout.SOUTH);
     }
 
-    private JPanel buildSidebarPlaceholder() {
-        JPanel panel = new JPanel();
-        panel.setBackground(ThemeManager.BG_SECONDARY);
-        panel.setPreferredSize(new Dimension(AppConstants.SIDEBAR_WIDTH, 0));
-        panel.setMinimumSize(new Dimension(AppConstants.SIDEBAR_WIDTH, 0));
-        panel.setBorder(BorderFactory.createMatteBorder(
-            0, 0, 0, 1, ThemeManager.BG_SURFACE));
-        return panel;
+    // ----------------------------------------------------------------
+    // Sidebar wiring
+    // ----------------------------------------------------------------
+
+    private void wireSidebar() {
+        // Search → highlight matching notes on canvas
+        sidebar.setOnSearch(query -> {
+            if (kbManager == null) return;
+            KnowledgeBase kb = kbManager.getKnowledgeBase();
+            var ids = kb.getAllNotes().stream()
+                .filter(n -> n.getFileName().toLowerCase()
+                              .contains(query.toLowerCase()))
+                .map(n -> n.getId())
+                .collect(Collectors.toSet());
+            galaxyCanvas.highlightNotes(ids);
+            statusBar.setStatus("Found " + ids.size() + " note(s) matching \"" + query + "\"");
+        });
+
+        sidebar.setOnSearchClear(galaxyCanvas::clearHighlight);
+
+        // Sector click → update status bar
+        sidebar.setOnSectorSelected(sector ->
+            statusBar.setStatus("Sector: " + sector.getLabel()));
+
+        // Incubator note click → update status bar
+        sidebar.setOnIncubatorNoteSelected(note ->
+            statusBar.setStatus("Incubator: " + note.getFileName()
+                + " (add more content to index)"));
+
+        // Navigator highlight → pass to canvas
+        sidebar.setOnNavigatorHighlight(galaxyCanvas::highlightNotes);
     }
 
     // ----------------------------------------------------------------
@@ -108,16 +129,29 @@ public class MainFrame extends JFrame {
 
     private void wireToolBar() {
         toolBar.setOnOpenKnowledgeBase(this::openKnowledgeBase);
+
         toolBar.setOnRefresh(() -> {
-            if (kbManager != null) statusBar.setStatus("Refreshing…");
-            galaxyCanvas.repaint();
+            if (kbManager != null) {
+                statusBar.setStatus("Refreshing…");
+                kbManager.reconcile();
+                refreshUIFromKB(kbManager.getKnowledgeBase());
+            }
         });
-        toolBar.setOnLayoutSwitch(layoutName -> {
-            // TODO (Phase 2): LayoutManager.switchLayout(layoutName)
-            statusBar.setStatus("Layout: " + layoutName);
-        });
+
+        toolBar.setOnLayoutSwitch(layoutName ->
+            statusBar.setStatus("Layout: " + layoutName));
+
         toolBar.setOnSettings(() -> {
-            // TODO (Phase 2): open SettingsDialog
+            if (currentStoreDir != null) {
+                SettingsDialog dlg = new SettingsDialog(this, currentStoreDir);
+                dlg.setOnSaved(cfg ->
+                    statusBar.setStatus("Settings saved"));
+                dlg.setVisible(true);
+            } else {
+                JOptionPane.showMessageDialog(this,
+                    "Please open a knowledge base first.",
+                    "No Knowledge Base", JOptionPane.INFORMATION_MESSAGE);
+            }
         });
     }
 
@@ -127,13 +161,11 @@ public class MainFrame extends JFrame {
 
     /** Open (or re-open) a knowledge base folder. */
     public void openKnowledgeBase(Path rootPath) {
-        Path storeDir = rootPath.resolve(AppConstants.DOT_DIR);
+        currentStoreDir = rootPath.resolve(AppConstants.DOT_DIR);
 
         KnowledgeBase kb = new KnowledgeBase(rootPath);
-        IndexStore    is = new IndexStore(storeDir);
-
-        // Dimension from config – default to OpenAI 1536 until ConfigStore is wired
-        EmbeddingStore es = new EmbeddingStore(storeDir, 1536);
+        IndexStore    is = new IndexStore(currentStoreDir);
+        EmbeddingStore es = new EmbeddingStore(currentStoreDir, 1536);
 
         persistenceManager = new PersistenceManager();
         persistenceManager.init(kb, is, es);
@@ -141,31 +173,51 @@ public class MainFrame extends JFrame {
         kbManager = new KnowledgeBaseManager(kb, is, persistenceManager);
         kbManager.loadPersistedIndex();
 
-        // Refresh canvas on new embeddings
-        kbManager.setOnGalaxyRefresh(ignored -> {
-            galaxyCanvas.setKnowledgeBase(kb);
-            statusBar.setNoteCount(kb.getNoteCount());
-            statusBar.setSectorCount(kb.getSectors().size());
-        });
+        kbManager.setOnGalaxyRefresh(ignored ->
+            SwingUtilities.invokeLater(() -> refreshUIFromKB(kb)));
 
-        galaxyCanvas.setKnowledgeBase(kb);
-        statusBar.setNoteCount(kb.getNoteCount());
-        statusBar.setSectorCount(kb.getSectors().size());
+        refreshUIFromKB(kb);
         statusBar.setStatus("Opened: " + rootPath.getFileName());
     }
 
     /** Load the bundled demo knowledge base from classpath resources. */
     public void openDemoKnowledgeBase() {
-        // Extract demo resources to a temp directory and open
-        try {
-            java.io.File tempDir = java.io.File.createTempFile("docgalaxy-demo", "");
-            tempDir.delete();
-            tempDir.mkdirs();
-            // TODO: copy demo resources from classpath to tempDir
-            statusBar.setStatus("Demo knowledge base loaded");
-        } catch (Exception e) {
-            statusBar.setStatus("Failed to load demo: " + e.getMessage());
-        }
+        ProgressDialog progress = ProgressDialog.showIndeterminate(
+            this, "Loading demo knowledge base…");
+
+        SwingWorker<Path, Void> worker = new SwingWorker<>() {
+            @Override
+            protected Path doInBackground() throws Exception {
+                return DemoLoader.extract();
+            }
+
+            @Override
+            protected void done() {
+                progress.close();
+                try {
+                    Path demoRoot = get();
+                    openKnowledgeBase(demoRoot);
+                    statusBar.setStatus("Demo knowledge base loaded – " +
+                        kbManager.getKnowledgeBase().getNoteCount() + " notes");
+                } catch (Exception ex) {
+                    LOGGER.log(Level.WARNING, "Failed to load demo KB", ex);
+                    statusBar.setStatus("Failed to load demo: " + ex.getMessage());
+                }
+            }
+        };
+        worker.execute();
+    }
+
+    // ----------------------------------------------------------------
+    // UI refresh helpers
+    // ----------------------------------------------------------------
+
+    private void refreshUIFromKB(KnowledgeBase kb) {
+        galaxyCanvas.setKnowledgeBase(kb);
+        sidebar.refresh(kb);
+        statusBar.setNoteCount(kb.getNoteCount());
+        statusBar.setSectorCount(kb.getSectors().size());
+        statusBar.setZoom(galaxyCanvas.getZoom());
     }
 
     // ----------------------------------------------------------------
@@ -180,11 +232,12 @@ public class MainFrame extends JFrame {
     }
 
     // ----------------------------------------------------------------
-    // Accessors (used by Sidebar, NavigatorPanel, etc.)
+    // Accessors
     // ----------------------------------------------------------------
 
     public GalaxyCanvas          getGalaxyCanvas()       { return galaxyCanvas; }
     public StatusBar             getStatusBar()          { return statusBar; }
+    public Sidebar               getSidebar()            { return sidebar; }
     public KnowledgeBaseManager  getKbManager()          { return kbManager; }
     public PersistenceManager    getPersistenceManager() { return persistenceManager; }
 }
