@@ -15,7 +15,14 @@ import javax.swing.SwingUtilities;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -24,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
 /**
  * Central orchestrator that connects file system events to the AI pipeline.
@@ -309,4 +317,154 @@ public class KnowledgeBaseManager implements FileChangeListener {
 
     /** Exposes the live vector map so Ying's VectorDatabase can be seeded from it. */
     public Map<String, double[]> getVectorMap() { return vectorMap; }
+
+    // ----------------------------------------------------------------
+    // Startup reconciliation (3-round matching)
+    // ----------------------------------------------------------------
+
+    /**
+     * Reconciles the persisted index against the actual files on disk.
+     * Called once after loadPersistedIndex(), before starting FileWatcher.
+     *
+     * Round 1 – exact path match
+     * Round 2 – FileKey (OS inode) match  →  hash match  →  size+mtime match
+     * Remaining unmatched files → new Notes (enqueue embedding)
+     * Remaining orphaned records → mark ORPHANED
+     */
+    public void reconcile() {
+        Path rootPath = knowledgeBase.getRootPath();
+
+        // ---- Collect all files on disk ----
+        List<Path> diskFiles = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(rootPath)) {
+            walk.filter(Files::isRegularFile)
+                .filter(this::isWatchedFile)
+                .filter(p -> !p.startsWith(rootPath.resolve(AppConstants.DOT_DIR)))
+                .forEach(diskFiles::add);
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Reconciliation: failed to walk directory", e);
+            return;
+        }
+
+        // ---- Round 1: exact path match ----
+        Set<String>   matchedNoteIds = new HashSet<>();
+        List<Path>    unmatchedFiles = new ArrayList<>();
+
+        for (Path file : diskFiles) {
+            String rel  = relativize(file);
+            Note   note = knowledgeBase.getNoteByPath(rel);
+            if (note != null) {
+                matchedNoteIds.add(note.getId());
+                // Refresh mtime / size in case they drifted
+                try {
+                    note.setFileSize(Files.size(file));
+                    note.setLastModified(Files.getLastModifiedTime(file).toMillis());
+                } catch (IOException ignored) {}
+            } else {
+                unmatchedFiles.add(file);
+            }
+        }
+
+        // Orphaned = in index but NOT on disk after round 1
+        Collection<Note> allNotes   = new ArrayList<>(knowledgeBase.getAllNotes());
+        List<Note>        orphans   = new ArrayList<>();
+        for (Note note : allNotes) {
+            if (!matchedNoteIds.contains(note.getId())) {
+                orphans.add(note);
+            }
+        }
+
+        // ---- Round 2: match unmatched files against orphaned records ----
+        // Build lookup maps for fast matching
+        Map<String, Note> orphanByFileKey = new HashMap<>();
+        Map<String, Note> orphanByHash    = new HashMap<>();
+
+        for (Note orphan : orphans) {
+            if (orphan.getFileKey()     != null) orphanByFileKey.put(orphan.getFileKey(), orphan);
+            if (orphan.getContentHash() != null) orphanByHash.put(orphan.getContentHash(), orphan);
+        }
+
+        List<Path> trulyNewFiles = new ArrayList<>();
+
+        for (Path file : unmatchedFiles) {
+            Note matched = null;
+
+            // Check 1: FileKey (OS inode) – strongest signal
+            String fileKey = readFileKey(file);
+            if (fileKey != null) matched = orphanByFileKey.get(fileKey);
+
+            // Check 2: content hash – high confidence
+            if (matched == null) {
+                try {
+                    String hash = HashUtil.sha256(Files.readString(file));
+                    matched = orphanByHash.get(hash);
+                } catch (IOException ignored) {}
+            }
+
+            if (matched != null) {
+                // It's a rename/move – update the record
+                orphans.remove(matched);
+                orphanByFileKey.remove(matched.getFileKey());
+                orphanByHash.remove(matched.getContentHash());
+
+                matched.setFilePath(relativize(file));
+                matched.setFileName(file.getFileName().toString());
+                matched.setStatus(NoteStatus.ACTIVE);
+                if (fileKey != null) matched.setFileKey(fileKey);
+                try {
+                    matched.setFileSize(Files.size(file));
+                    matched.setLastModified(Files.getLastModifiedTime(file).toMillis());
+                } catch (IOException ignored) {}
+
+                LOGGER.info("Reconcile: renamed/moved note detected → " + matched.getFilePath());
+            } else {
+                trulyNewFiles.add(file);
+            }
+        }
+
+        // ---- Mark remaining orphans ----
+        for (Note orphan : orphans) {
+            orphan.setStatus(NoteStatus.ORPHANED);
+            LOGGER.info("Reconcile: orphaned note → " + orphan.getFilePath());
+        }
+
+        // ---- Create new Notes for truly new files ----
+        for (Path file : trulyNewFiles) {
+            try {
+                String content = Files.readString(file);
+                if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) continue;
+
+                String relPath = relativize(file);
+                Note   note    = new Note(relPath, file.getFileName().toString());
+                note.setContentHash(HashUtil.sha256(content));
+                note.setFileKey(readFileKey(file));
+                note.setFileSize(Files.size(file));
+                note.setLastModified(Files.getLastModifiedTime(file).toMillis());
+
+                knowledgeBase.addNote(note);
+                enqueueEmbedding(note, content);
+                LOGGER.info("Reconcile: new file indexed → " + relPath);
+            } catch (IOException e) {
+                LOGGER.log(Level.WARNING, "Reconcile: failed to process " + file, e);
+            }
+        }
+
+        persistenceManager.markDirty(PersistenceManager.STORE_INDEX);
+        LOGGER.info("Reconciliation complete – "
+            + knowledgeBase.getNoteCount() + " notes, "
+            + orphans.size() + " orphaned, "
+            + trulyNewFiles.size() + " new");
+    }
+
+    /** Read the OS-level file key (inode on Unix). Returns null if unavailable. */
+    private static String readFileKey(Path path) {
+        try {
+            BasicFileAttributes attrs =
+                Files.readAttributes(path, BasicFileAttributes.class);
+            Object key = attrs.fileKey();
+            return key != null ? key.toString() : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
 }
