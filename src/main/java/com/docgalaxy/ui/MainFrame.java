@@ -225,6 +225,7 @@ public class MainFrame extends JFrame {
 
         sidebar.setOnNavigatorHighlight(galaxyCanvas::highlightNotes);
         sidebar.setOnNavigatorShowRoute(galaxyCanvas::showNavigationRoute);
+        sidebar.getNavigatorPanel().setCanvasController(galaxyCanvas);
     }
 
     // ----------------------------------------------------------------

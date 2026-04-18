@@ -6,6 +6,7 @@ import com.docgalaxy.ai.navigator.NavigatorService;
 import com.docgalaxy.ai.navigator.RouteStep;
 import com.docgalaxy.model.KnowledgeBase;
 import com.docgalaxy.ui.ThemeManager;
+import com.docgalaxy.ui.canvas.CanvasController;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -32,10 +33,12 @@ import java.util.stream.Collectors;
  */
 public class NavigatorPanel extends JPanel {
 
-    private static final int    BUBBLE_CORNER  = 8;
-    private static final int    BUBBLE_INDENT  = 36; // px indent on the non-aligned side
-    private static final String PLACEHOLDER    = "e.g. Help me plan a study path for...";
-    private static final int    HEADER_HEIGHT  = 34;
+    private static final int    BUBBLE_CORNER      = 8;
+    private static final int    BUBBLE_H_MARGIN    = 8;  // left/right outer margin in wrapper
+    private static final float  USER_BUBBLE_MAX    = 0.70f;
+    private static final float  AI_BUBBLE_WIDTH    = 0.90f;
+    private static final String PLACEHOLDER        = "e.g. Help me plan a study path for...";
+    private static final int    HEADER_HEIGHT      = 34;
 
     private final JPanel      chatBox;
     private final JScrollPane chatScroll;
@@ -48,6 +51,7 @@ public class NavigatorPanel extends JPanel {
     private LearningStyle       learningStyle = LearningStyle.OVERVIEW_FIRST;
     private Consumer<Set<String>>   onHighlight;
     private Consumer<List<String>>  onShowRoute;
+    private CanvasController        canvasController;
 
     public NavigatorPanel() {
         setLayout(new BorderLayout());
@@ -85,6 +89,7 @@ public class NavigatorPanel extends JPanel {
     public void setLearningStyle(LearningStyle style)         { this.learningStyle = style; }
     public void setOnHighlight(Consumer<Set<String>> cb)      { this.onHighlight = cb; }
     public void setOnShowRoute(Consumer<List<String>> cb)     { this.onShowRoute = cb; }
+    public void setCanvasController(CanvasController cc)      { this.canvasController = cc; }
 
     // ----------------------------------------------------------------
     // Header (collapse toggle)
@@ -126,6 +131,7 @@ public class NavigatorPanel extends JPanel {
         toggle.setText(collapsed ? "+" : "−");
         setMaximumSize(new Dimension(Integer.MAX_VALUE,
             collapsed ? HEADER_HEIGHT : Integer.MAX_VALUE));
+        if (collapsed && canvasController != null) canvasController.clearHighlight();
         revalidate();
     }
 
@@ -232,6 +238,8 @@ public class NavigatorPanel extends JPanel {
                        "Please set an API key in Settings.", false);
             return;
         }
+
+        if (canvasController != null) canvasController.clearHighlight();
 
         // Add thinking bubble and start animation
         JTextArea thinkingArea = addAiBubble("Thinking.");
@@ -381,31 +389,68 @@ public class NavigatorPanel extends JPanel {
     }
 
     /**
-     * Full-width wrapper that:
-     * – fills the chatBox width (BoxLayout child, aligns LEFT)
-     * – indents user bubbles from the left / AI bubbles from the right
-     * – lets text wrap properly as the sidebar resizes
+     * Full-width wrapper row that positions the bubble at the correct side and size:
+     *   User  – right-aligned, width = min(textWidth + padding, 70% of row)
+     *   AI    – left-aligned,  width = 90% of row
+     * Height is always derived from how the text wraps at the computed width.
      */
     private JPanel buildBubbleWrapper(JTextArea area, boolean isUser) {
         JPanel bubble = buildRoundedBubble(area, isUser);
 
-        // Fixed-width spacer on the non-primary side
-        JPanel spacer = new JPanel();
-        spacer.setOpaque(false);
-        spacer.setPreferredSize(new Dimension(BUBBLE_INDENT, 0));
+        JPanel wrapper = new JPanel(null) {
+            @Override
+            public void doLayout() {
+                int w = getWidth();
+                if (w == 0) return;
+                int avail = w - 2 * BUBBLE_H_MARGIN;
 
-        JPanel wrapper = new JPanel(new BorderLayout(0, 0));
+                int bubbleW, bubbleX;
+                if (isUser) {
+                    int maxW = (int)(avail * USER_BUBBLE_MAX);
+                    bubbleW = Math.min(naturalBubbleWidth(area), maxW);
+                    bubbleX = w - BUBBLE_H_MARGIN - bubbleW; // flush right
+                } else {
+                    bubbleW = (int)(avail * AI_BUBBLE_WIDTH);
+                    bubbleX = BUBBLE_H_MARGIN;               // flush left
+                }
+
+                int bubbleH = bubbleHeight(area, bubbleW);
+                bubble.setBounds(bubbleX, 2, bubbleW, bubbleH);
+            }
+
+            @Override
+            public Dimension getPreferredSize() {
+                int w = (getParent() != null && getParent().getWidth() > 0)
+                        ? getParent().getWidth() : 220;
+                int avail = w - 2 * BUBBLE_H_MARGIN;
+                int bubbleW = isUser
+                        ? Math.min(naturalBubbleWidth(area), (int)(avail * USER_BUBBLE_MAX))
+                        : (int)(avail * AI_BUBBLE_WIDTH);
+                return new Dimension(w, bubbleHeight(area, bubbleW) + 4);
+            }
+        };
         wrapper.setOpaque(false);
         wrapper.setAlignmentX(Component.LEFT_ALIGNMENT);
-        wrapper.setBorder(new EmptyBorder(0, 8, 0, 8));
-
-        if (isUser) {
-            wrapper.add(spacer, BorderLayout.WEST);   // indent from left → bubble on right
-            wrapper.add(bubble, BorderLayout.CENTER);
-        } else {
-            wrapper.add(bubble, BorderLayout.CENTER);
-            wrapper.add(spacer, BorderLayout.EAST);   // indent from right → bubble on left
-        }
+        wrapper.add(bubble);
         return wrapper;
+    }
+
+    /** Width the bubble would naturally need to fit all text on one logical line. */
+    private int naturalBubbleWidth(JTextArea area) {
+        FontMetrics fm = area.getFontMetrics(area.getFont());
+        int maxLine = 0;
+        for (String line : area.getText().split("\n", -1)) {
+            maxLine = Math.max(maxLine, fm.stringWidth(line));
+        }
+        // 20 px = area EmptyBorder (10 left + 10 right)
+        return maxLine + 20 + 4;
+    }
+
+    /** Pixel height the bubble needs when constrained to bubbleW pixels wide. */
+    private int bubbleHeight(JTextArea area, int bubbleW) {
+        // area border: EmptyBorder(6,10,6,10) → 20 px horizontal, 12 px vertical
+        int innerW = Math.max(bubbleW - 20, 10);
+        area.setSize(innerW, Short.MAX_VALUE);
+        return area.getPreferredSize().height + 12;
     }
 }

@@ -271,6 +271,8 @@ public final class GalaxyCanvas extends JPanel implements CanvasController {
     public void clearHighlight() {
         highlightedNotes.clear();
         if (overlayLayer != null) overlayLayer.setHighlightedNotes(Collections.emptySet());
+        navigationRoute.clear();
+        if (overlayLayer != null) overlayLayer.setNavigationRoute(Collections.emptyList());
         repaint();
     }
 
