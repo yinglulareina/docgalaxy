@@ -14,6 +14,7 @@ import com.docgalaxy.layout.DimensionReducer;
 import com.docgalaxy.layout.ForceDirectedLayout;
 import com.docgalaxy.layout.NodeData;
 import com.docgalaxy.layout.RadialLayout;
+import com.docgalaxy.layout.TreeLayout;
 import com.docgalaxy.model.Edge;
 import com.docgalaxy.model.KnowledgeBase;
 import com.docgalaxy.model.Note;
@@ -22,8 +23,10 @@ import com.docgalaxy.model.Vector2D;
 import com.docgalaxy.model.celestial.CelestialBody;
 import com.docgalaxy.model.celestial.Nebula;
 import com.docgalaxy.model.celestial.Star;
+import com.docgalaxy.persistence.ClusterStore;
 import com.docgalaxy.persistence.EmbeddingStore;
 import com.docgalaxy.persistence.IndexStore;
+import com.docgalaxy.persistence.NoteIndex;
 import com.docgalaxy.persistence.PersistenceManager;
 import com.docgalaxy.ui.canvas.GalaxyCanvas;
 import com.docgalaxy.ui.canvas.layer.BackgroundLayer;
@@ -31,6 +34,7 @@ import com.docgalaxy.ui.canvas.layer.EdgeLayer;
 import com.docgalaxy.ui.canvas.layer.GalaxyOverlayLayer;
 import com.docgalaxy.ui.canvas.layer.LabelLayer;
 import com.docgalaxy.ui.canvas.layer.NebulaLayer;
+import com.docgalaxy.ui.canvas.layer.RadialRingLayer;
 import com.docgalaxy.ui.canvas.layer.StarLayer;
 import com.docgalaxy.ui.components.Sidebar;
 import com.docgalaxy.ui.components.StatusBar;
@@ -88,9 +92,11 @@ public class MainFrame extends JFrame {
     private List<Note>            lastNotes;
     private List<Sector>          lastSectors;
     private List<Edge>            lastEdges;
+    private List<Nebula>          lastNebulae;
     private Map<String, String>   lastNoteToSector;
     private Map<String, Sector>   lastSectorById;
     private Map<String, Vector2D> lastPositions;
+    private List<Cluster>          lastClusters;
 
     // ----------------------------------------------------------------
     // Construction
@@ -237,21 +243,79 @@ public class MainFrame extends JFrame {
                 statusBar.setStatus("Layout: " + layoutName + " (no KB loaded)");
                 return;
             }
-            // Choose strategy by name (Tree falls back to Radial)
-            var strategy = switch (layoutName) {
-                case "Radial" -> new RadialLayout();
-                default       -> new ForceDirectedLayout();
-            };
-            statusBar.setStatus("Computing " + layoutName + " layout…");
+
+            if ("Tree".equals(layoutName)) {
+                // Tree layout: driven by real cluster dendrograms from HybridClusterStrategy
+                if (lastClusters == null || lastClusters.isEmpty()) {
+                    statusBar.setStatus("Tree layout: no cluster data — load a knowledge base first");
+                    return;
+                }
+                int w = galaxyCanvas.getWidth()  > 0 ? galaxyCanvas.getWidth()
+                                                      : AppConstants.DEFAULT_WINDOW_WIDTH;
+                int h = galaxyCanvas.getHeight() > 0 ? galaxyCanvas.getHeight()
+                                                      : AppConstants.DEFAULT_WINDOW_HEIGHT;
+                TreeLayout treeLayout = new TreeLayout(lastClusters, w, h);
+                statusBar.setStatus("Computing Tree layout…");
+                new SwingWorker<Map<String, Vector2D>, Void>() {
+                    @Override
+                    protected Map<String, Vector2D> doInBackground() {
+                        return treeLayout.calculate(lastNodeDataList);
+                    }
+                    @Override
+                    protected void done() {
+                        try {
+                            applyNewLayout(get(), treeLayout.getTreeEdges());
+                            statusBar.setStatus("Layout: Tree");
+                        } catch (Exception ex) {
+                            statusBar.setStatus("Layout switch failed: " + ex.getMessage());
+                        }
+                    }
+                }.execute();
+                return;
+            }
+
+            if ("Radial".equals(layoutName)) {
+                int w = galaxyCanvas.getWidth()  > 0 ? galaxyCanvas.getWidth()
+                                                      : AppConstants.DEFAULT_WINDOW_WIDTH;
+                int h = galaxyCanvas.getHeight() > 0 ? galaxyCanvas.getHeight()
+                                                      : AppConstants.DEFAULT_WINDOW_HEIGHT;
+                RadialLayout radialLayout = new RadialLayout(w, h);
+                statusBar.setStatus("Computing Radial layout…");
+                new SwingWorker<Map<String, Vector2D>, Void>() {
+                    @Override
+                    protected Map<String, Vector2D> doInBackground() {
+                        return radialLayout.calculate(lastNodeDataList);
+                    }
+                    @Override
+                    protected void done() {
+                        try {
+                            applyNewLayout(get(), Collections.emptyList());
+                            galaxyCanvas.addLayer(new RadialRingLayer(
+                                    radialLayout.getCenterPosition(),
+                                    radialLayout.getRingCount(),
+                                    RadialLayout.RING_SPACING));
+                            galaxyCanvas.repaint();
+                            statusBar.setStatus("Layout: Radial");
+                        } catch (Exception ex) {
+                            statusBar.setStatus("Layout switch failed: " + ex.getMessage());
+                        }
+                    }
+                }.execute();
+                return;
+            }
+
+            // Galaxy (ForceDirected) path
+            ForceDirectedLayout fdLayout = new ForceDirectedLayout();
+            statusBar.setStatus("Computing Galaxy layout…");
             new SwingWorker<Map<String, Vector2D>, Void>() {
                 @Override
                 protected Map<String, Vector2D> doInBackground() throws Exception {
-                    return strategy.calculate(lastNodeDataList);
+                    return fdLayout.calculate(lastNodeDataList);
                 }
                 @Override
                 protected void done() {
                     try {
-                        applyNewLayout(get());
+                        applyNewLayout(get(), lastEdges);
                         statusBar.setStatus("Layout: " + layoutName);
                     } catch (Exception ex) {
                         statusBar.setStatus("Layout switch failed: " + ex.getMessage());
@@ -307,7 +371,7 @@ public class MainFrame extends JFrame {
             statusBar.setStatus("Opened: " + rootPath.getFileName() + " — building galaxy…");
 
             // Run the heavy pipeline off the EDT
-            new PipelineWorker(rootPath, kb).execute();
+            new PipelineWorker(rootPath, kb, currentStoreDir).execute();
         } catch (Exception e) {
             LOGGER.log(Level.WARNING, "Failed to open knowledge base", e);
             JOptionPane.showMessageDialog(this,
@@ -351,10 +415,12 @@ public class MainFrame extends JFrame {
 
         private final Path          folder;
         private final KnowledgeBase kb;
+        private final Path          storeDir;
 
-        PipelineWorker(Path folder, KnowledgeBase kb) {
-            this.folder = folder;
-            this.kb     = kb;
+        PipelineWorker(Path folder, KnowledgeBase kb, Path storeDir) {
+            this.folder   = folder;
+            this.kb       = kb;
+            this.storeDir = storeDir;
         }
 
         @Override
@@ -388,32 +454,99 @@ public class MainFrame extends JFrame {
             VectorDatabase db = VectorDatabase.getInstance();
             db.clear();
 
+            // Load persisted index to reuse stable UUIDs across restarts.
+            // Use RELATIVE paths as the lookup key so we match regardless of
+            // whether index.json stored absolute or relative paths.
+            Map<String, String> filePathToId = new HashMap<>();
+            try {
+                NoteIndex existingIndex = new IndexStore(storeDir).load();
+                for (NoteIndex.NoteRecord r : existingIndex.getNotes()) {
+                    if (r.getFilePath() == null || r.getId() == null) continue;
+                    try {
+                        Path p = Path.of(r.getFilePath());
+                        // Normalize to relative path from KB root for consistent lookup
+                        String relKey = p.isAbsolute()
+                                ? folder.toAbsolutePath().normalize()
+                                        .relativize(p.toAbsolutePath().normalize()).toString()
+                                : p.normalize().toString();
+                        filePathToId.put(relKey, r.getId());
+                    } catch (Exception ignored) {
+                        filePathToId.put(r.getFilePath(), r.getId()); // fallback
+                    }
+                }
+            } catch (Exception ex) {
+                System.err.println("[PIPELINE] Could not load index.json for UUID reuse: "
+                        + ex.getMessage());
+            }
+
             List<Note>   pendingNotes    = new ArrayList<>();
             List<String> pendingContents = new ArrayList<>();
+            Path absRoot = folder.toAbsolutePath().normalize();
             for (Path file : files) {
                 try {
-                    pendingNotes.add(new Note(file.toAbsolutePath().toString(),
-                                              file.getFileName().toString()));
+                    // Use relative path as lookup key (matches what index.json stores)
+                    String relPath    = absRoot.relativize(
+                            file.toAbsolutePath().normalize()).toString();
+                    String absPath    = file.toAbsolutePath().toString();
+                    String existingId = filePathToId.get(relPath);
+                    boolean reused    = existingId != null;
+                    Note   note       = reused
+                            ? new Note(existingId, absPath, file.getFileName().toString())
+                            : new Note(absPath, file.getFileName().toString());
+                    pendingNotes.add(note);
                     pendingContents.add(Files.readString(file));
                 } catch (IOException e) {
                     System.err.println("  Skipping unreadable: " + file.getFileName());
                 }
             }
 
-            final int BATCH = 20;
-            List<Note>     notes   = new ArrayList<>();
-            List<double[]> vectors = new ArrayList<>();
-            int total = pendingNotes.size();
+            // --- Load cached embeddings from disk ---
+            Map<String, double[]> cachedVectors = new HashMap<>();
+            try {
+                EmbeddingStore es = new EmbeddingStore(storeDir,
+                        AppConstants.DEFAULT_EMBEDDING_DIMENSION);
+                cachedVectors = es.load();
+                if (!cachedVectors.isEmpty()) {
+                    System.out.println("[EMBED] Loaded " + cachedVectors.size()
+                            + " cached vectors from embeddings.bin");
+                }
+            } catch (Exception ex) {
+                System.err.println("[EMBED] Could not load embeddings.bin: " + ex.getMessage());
+            }
 
+            // --- Split: cached vs. needs-embed ---
+            List<Note>     notes         = new ArrayList<>();
+            List<double[]> vectors       = new ArrayList<>();
+            List<Note>     toEmbed       = new ArrayList<>();
+            List<String>   toEmbedContents = new ArrayList<>();
+
+            for (int i = 0; i < pendingNotes.size(); i++) {
+                Note     note   = pendingNotes.get(i);
+                double[] cached = cachedVectors.get(note.getId());
+                if (cached != null) {
+                    db.add(note.getId(), cached);
+                    notes.add(note);
+                    vectors.add(cached);
+                } else {
+                    toEmbed.add(note);
+                    toEmbedContents.add(pendingContents.get(i));
+                }
+            }
+            System.out.printf("[EMBED] %d cached, %d to embed%n",
+                    notes.size(), toEmbed.size());
+
+            // --- Batch-embed only the uncached notes ---
+            final int BATCH = 20;
             long embedStart = System.currentTimeMillis();
-            for (int start = 0; start < total; start += BATCH) {
-                int end = Math.min(start + BATCH, total);
-                System.out.println("Embedding " + (start + 1) + "-" + end + "/" + total + "…");
+            for (int start = 0; start < toEmbed.size(); start += BATCH) {
+                int end = Math.min(start + BATCH, toEmbed.size());
+                System.out.println("Embedding " + (start + 1) + "-" + end
+                        + "/" + toEmbed.size() + "…");
                 try {
-                    List<String>   batch   = pendingContents.subList(start, end);
+                    List<String>   batch   = toEmbedContents.subList(start, end);
                     List<double[]> results = embedder.batchEmbed(batch);
                     for (int i = 0; i < results.size(); i++) {
-                        Note note = pendingNotes.get(start + i);
+                        Note note = toEmbed.get(start + i);
                         db.add(note.getId(), results.get(i));
                         notes.add(note);
                         vectors.add(results.get(i));
@@ -422,8 +555,19 @@ public class MainFrame extends JFrame {
                     System.err.println("  Batch error: " + e.getMessage());
                 }
             }
-            System.out.printf("Embedding: %dms (%d files)%n",
-                    System.currentTimeMillis() - embedStart, notes.size());
+            System.out.printf("Embedding: %dms (%d total, %d new)%n",
+                    System.currentTimeMillis() - embedStart,
+                    notes.size(), toEmbed.size());
+
+            // --- Persist new embeddings so next run can skip API calls ---
+            if (!toEmbed.isEmpty()) {
+                Map<String, double[]> allVectors = new HashMap<>();
+                for (int i = 0; i < notes.size(); i++) {
+                    allVectors.put(notes.get(i).getId(), vectors.get(i));
+                }
+                persistenceManager.setCurrentVectors(allVectors);
+                persistenceManager.markDirty(PersistenceManager.STORE_EMBEDDINGS);
+            }
 
             if (notes.isEmpty()) return null;
 
@@ -439,13 +583,26 @@ public class MainFrame extends JFrame {
                 pcaPositions.put(notes.get(i).getId(), points2D.get(i));
             }
 
-            // Clustering
+            // Clustering (with cache)
             long clusterStart = System.currentTimeMillis();
-            List<String>          noteIds   = notes.stream().map(Note::getId).collect(Collectors.toList());
-            HybridClusterStrategy clusterer = new HybridClusterStrategy();
-            List<Cluster>         clusters  = clusterer.cluster(points2D, noteIds);
-            System.out.printf("Clustering: %dms (%d sectors)%n",
-                    System.currentTimeMillis() - clusterStart, clusters.size());
+            List<String> noteIds  = notes.stream().map(Note::getId).collect(Collectors.toList());
+            ClusterStore clusterStore = new ClusterStore(storeDir);
+            List<Cluster> clusters = tryLoadClusterCache(clusterStore, noteIds.size(), noteIds);
+            boolean fromCache = (clusters != null);
+            if (fromCache) {
+                System.out.printf("Clustering: cache hit (%d sectors)%n", clusters.size());
+            } else {
+                HybridClusterStrategy clusterer = new HybridClusterStrategy();
+                // Wrap in mutable list so we can set colors + labels before saving
+                clusters = new ArrayList<>(clusterer.cluster(points2D, noteIds));
+                System.out.printf("Clustering: %dms (%d sectors)%n",
+                        System.currentTimeMillis() - clusterStart, clusters.size());
+                // Assign sector colors (labels will be set in the sector loop below)
+                for (int ci = 0; ci < clusters.size(); ci++) {
+                    clusters.get(ci).setColor(ThemeManager.getSectorColor(ci));
+                }
+                // Don't save yet — wait until labels are assigned in the sector loop
+            }
 
             Map<String, String> noteIdToFileName = new HashMap<>();
             for (Note note : notes) noteIdToFileName.put(note.getId(), note.getFileName());
@@ -454,17 +611,28 @@ public class MainFrame extends JFrame {
             Map<String, String> noteToSector = new HashMap<>();
             Map<String, Sector> sectorById   = new HashMap<>();
             Set<String>         usedLabels   = new HashSet<>();
+            boolean             labelsAdded  = false;   // true if any label was freshly generated
 
             for (int i = 0; i < clusters.size(); i++) {
                 Cluster cluster  = clusters.get(i);
                 String  sectorId = "sector-" + i;
-                Color   color    = ThemeManager.getSectorColor(i);
+                // Prefer persisted color; fall back to index-based assignment
+                Color   color    = cluster.getColor() != null
+                        ? cluster.getColor() : ThemeManager.getSectorColor(i);
 
                 List<String> memberFileNames = cluster.getMemberNoteIds().stream()
                         .map(id -> noteIdToFileName.getOrDefault(id, id))
                         .collect(Collectors.toList());
 
-                String label = labelClusterLLM(memberFileNames, chatProvider, usedLabels, i);
+                // Use cached label if available (avoids re-calling LLM on cache hit)
+                String label;
+                if (cluster.getLabel() != null && !cluster.getLabel().isBlank()) {
+                    label = cluster.getLabel();
+                } else {
+                    label = labelClusterLLM(memberFileNames, chatProvider, usedLabels, i);
+                    cluster.setLabel(label);
+                    labelsAdded = true;
+                }
                 usedLabels.add(label);
 
                 Sector sector = new Sector(sectorId, label, color);
@@ -474,6 +642,15 @@ public class MainFrame extends JFrame {
                 sectors.add(sector);
                 sectorById.put(sectorId, sector);
                 for (String nid : cluster.getMemberNoteIds()) noteToSector.put(nid, sectorId);
+            }
+
+            // Save cluster cache whenever labels were freshly generated
+            // (covers both fresh clustering AND first hit on an old cache without labels)
+            if (!fromCache || labelsAdded) {
+                try { clusterStore.save(clusters); }
+                catch (Exception ex) {
+                    System.err.println("  Cluster cache save failed: " + ex.getMessage());
+                }
             }
 
             String fallbackSectorId = sectors.isEmpty() ? null : sectors.get(0).getId();
@@ -561,6 +738,7 @@ public class MainFrame extends JFrame {
             final List<Sector>            fSectors      = sectors;
             final List<Note>              fNotes        = notes;
             final List<NodeData>          fNodeDataList = nodeDataList;
+            final List<Cluster>           fClusters     = clusters;
             final Map<String, String>     fNoteToSector = noteToSector;
             final Map<String, Sector>     fSectorById   = sectorById;
             final Map<String, Vector2D>   fFinalPositions = new HashMap<>(finalPositions);
@@ -606,6 +784,11 @@ public class MainFrame extends JFrame {
                 lastPositions     = new HashMap<>(fFinalPositions);
                 lastSectors       = new ArrayList<>(fSectors);
                 lastEdges         = new ArrayList<>(fEdges);
+                lastClusters      = new ArrayList<>(fClusters);
+                lastNebulae       = fNebulae;   // same list object referenced by NebulaLayer
+
+                // Clean up empty / singleton sectors
+                cleanupEmptySectors(kb);
 
                 // Inject NavigatorService into sidebar panel (#4)
                 if (fChatProvider != null) {
@@ -623,6 +806,153 @@ public class MainFrame extends JFrame {
     }
 
     // ----------------------------------------------------------------
+    // Cluster cache helpers
+    // ----------------------------------------------------------------
+
+    /**
+     * Loads the cached clusters and returns them if:
+     * <ol>
+     *   <li>Note count change is &lt; 20 %.</li>
+     *   <li>Overlap between cached note IDs and current note IDs is &ge; 80 %.</li>
+     * </ol>
+     * Returns {@code null} if the cache is absent, empty, or fails either check.
+     */
+    private static List<Cluster> tryLoadClusterCache(ClusterStore store,
+                                                      int currentNoteCount,
+                                                      List<String> currentNoteIds) {
+        try {
+            List<Cluster> cached = store.load();
+            if (cached == null || cached.isEmpty()) return null;
+
+            List<String> cachedIds = cached.stream()
+                    .flatMap(c -> c.getMemberNoteIds().stream())
+                    .collect(Collectors.toList());
+            int totalCached = cachedIds.size();
+            if (totalCached == 0) return null;
+
+            Set<String> currentSet = new HashSet<>(currentNoteIds);
+            long overlapCount = cachedIds.stream().filter(currentSet::contains).count();
+
+            // Count check: < 20% change
+            double delta = Math.abs(currentNoteCount - totalCached) / (double) totalCached;
+            if (delta >= 0.20) return null;
+
+            // Overlap check: >= 80% of cached IDs must exist in current run
+            double overlapRatio = (double) overlapCount / totalCached;
+            if (overlapRatio < 0.80) return null;
+
+            return cached;
+        } catch (Exception ex) {
+            System.err.println("  Cluster cache load failed: " + ex.getMessage());
+            return null;
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Sector cleanup (empty + singleton sectors)
+    // ----------------------------------------------------------------
+
+    /**
+     * Removes empty sectors (0 members) and merges singleton sectors (1 member)
+     * into the nearest neighbour sector by centroid distance.
+     *
+     * <p>Must be called on the EDT after {@code lastNebulae} and {@code lastSectors}
+     * have been assigned.
+     */
+    private void cleanupEmptySectors(KnowledgeBase kb) {
+        if (lastSectors == null || lastNebulae == null) return;
+
+        // Build a live star lookup from canvas bodies (needed for sector reassignment)
+        Map<String, Star> starById = new HashMap<>();
+        for (CelestialBody b : galaxyCanvas.getBodies()) {
+            if (b instanceof Star s) starById.put(s.getNote().getId(), s);
+        }
+
+        List<Sector> toRemove = new ArrayList<>();
+
+        // --- Pass 1: collect empty sectors ---
+        for (Sector sector : new ArrayList<>(lastSectors)) {
+            if (sector.getNoteIds().isEmpty()) {
+                toRemove.add(sector);
+            }
+        }
+
+        // --- Pass 2: collect singleton sectors and merge them ---
+        for (Sector sector : new ArrayList<>(lastSectors)) {
+            if (toRemove.contains(sector)) continue;
+            if (sector.getNoteIds().size() != 1) continue;
+
+            // Find the nearest other active sector by centroid distance
+            String orphanId  = sector.getNoteIds().get(0);
+            Vector2D orphanPos = (lastPositions != null)
+                    ? lastPositions.get(orphanId) : null;
+            if (orphanPos == null && sector.getCentroid() != null) {
+                orphanPos = sector.getCentroid();
+            }
+
+            Sector nearest = null;
+            double nearestDist = Double.MAX_VALUE;
+            for (Sector other : lastSectors) {
+                if (other == sector || toRemove.contains(other)) continue;
+                if (other.getCentroid() == null) continue;
+                double dist = (orphanPos != null)
+                        ? orphanPos.distanceTo(other.getCentroid())
+                        : sector.getCentroid() != null
+                            ? sector.getCentroid().distanceTo(other.getCentroid())
+                            : Double.MAX_VALUE;
+                if (dist < nearestDist) { nearestDist = dist; nearest = other; }
+            }
+
+            if (nearest != null) {
+                // Merge orphan note into the nearest sector
+                nearest.getNoteIds().add(orphanId);
+                if (lastNoteToSector != null) lastNoteToSector.put(orphanId, nearest.getId());
+                Star orphanStar = starById.get(orphanId);
+                if (orphanStar != null) orphanStar.setSector(nearest);
+
+                toRemove.add(sector);
+            }
+        }
+
+        if (toRemove.isEmpty()) return;
+
+        // --- Remove sectors from all data structures ---
+        Set<String> removeIds = toRemove.stream()
+                .map(Sector::getId).collect(Collectors.toSet());
+
+        lastSectors.removeIf(s -> removeIds.contains(s.getId()));
+        lastNebulae.removeIf(n -> removeIds.contains(n.getSector().getId()));
+        kb.setSectors(new ArrayList<>(lastSectors));
+
+        // Update hit-testing body list in canvas
+        List<CelestialBody> bodies = galaxyCanvas.getBodies().stream()
+                .filter(b -> !(b instanceof Nebula n && removeIds.contains(n.getSector().getId())))
+                .collect(Collectors.toList());
+        galaxyCanvas.setBodies(bodies);
+
+        // Persist updated cluster cache (without removed sectors)
+        if (currentStoreDir != null) {
+            try {
+                ClusterStore cs = new ClusterStore(currentStoreDir);
+                List<Cluster> remaining = cs.load();
+                remaining.removeIf(c -> {
+                    // A cluster is "removed" if all its members now belong to other sectors
+                    Set<String> memberSet = new HashSet<>(c.getMemberNoteIds());
+                    return lastSectors.stream()
+                            .noneMatch(s -> s.getNoteIds().stream().anyMatch(memberSet::contains));
+                });
+                cs.save(remaining);
+            } catch (Exception ex) {
+                System.err.println("[CLEANUP] Failed to update clusters.json: " + ex.getMessage());
+            }
+        }
+
+        // Refresh UI
+        refreshUIFromKB(kb);
+        galaxyCanvas.repaint();
+    }
+
+    // ----------------------------------------------------------------
     // Cluster label helpers
     // ----------------------------------------------------------------
 
@@ -633,12 +963,15 @@ public class MainFrame extends JFrame {
         if (memberFileNames.isEmpty()) return "Cluster " + (index + 1);
 
         String fileList     = String.join(", ", memberFileNames);
-        String systemPrompt = "You are naming a topic cluster in a knowledge base.";
+        String systemPrompt = "You are naming a topic cluster in a student's knowledge base."
+                + " Give clear, specific 2-3 word topic names."
+                + " Avoid generic words like 'overview', 'concepts', 'cluster', 'basics'."
+                + " Good examples: 'CPU Architecture', 'Hash-Based Structures', 'OOP Design Patterns'."
+                + " Bad examples: 'Programming Concepts', 'Data Structure Overview'."
+                + " Output only the name.";
 
         if (chatProvider != null) {
-            String userPrompt = "The cluster contains these notes: " + fileList
-                    + ". Give this cluster a short descriptive name, 2-4 words in English."
-                    + " Output only the name, nothing else.";
+            String userPrompt = "The cluster contains notes about: " + fileList + ".";
             try {
                 ChatResponse resp = chatProvider.chatWithSystem(systemPrompt, userPrompt);
                 if (resp.isSuccess() && resp.getContent() != null && !resp.getContent().isBlank()) {
@@ -705,13 +1038,29 @@ public class MainFrame extends JFrame {
 
     /**
      * Rebuilds all stars/nebulae/layers with the given new positions and
-     * repaints the canvas.  Called on the EDT from the layout-switch SwingWorker.
+     * repaints the canvas.  Uses KNN edges.  Called on the EDT from the
+     * layout-switch SwingWorker for Galaxy and Radial modes.
      */
     private void applyNewLayout(Map<String, Vector2D> newPositions) {
+        applyNewLayout(newPositions, lastEdges);
+    }
+
+    /**
+     * Core layout-application method.
+     *
+     * <p>{@code displayEdges} controls what {@link EdgeLayer} draws:
+     * <ul>
+     *   <li>Galaxy / Radial — pass {@code lastEdges} (KNN similarity edges)</li>
+     *   <li>Tree — pass {@code TreeLayout.getTreeEdges()} (parent→child edges);
+     *       {@code newPositions} then includes internal-node positions so the
+     *       EdgeLayer can resolve all edge endpoints.</li>
+     * </ul>
+     */
+    private void applyNewLayout(Map<String, Vector2D> newPositions, List<Edge> displayEdges) {
         if (lastNotes == null || newPositions == null || newPositions.isEmpty()) return;
 
         List<Star> newStars = new ArrayList<>();
-        Map<String, Vector2D> posMap = new HashMap<>();
+        Map<String, Vector2D> notePosMap = new HashMap<>();  // note positions only (for stars/nebulae)
         for (Note note : lastNotes) {
             Vector2D pos = newPositions.getOrDefault(note.getId(),
                            lastPositions != null ? lastPositions.getOrDefault(note.getId(),
@@ -723,7 +1072,7 @@ public class MainFrame extends JFrame {
             if (sector == null) continue;
             Star star = new Star(note, pos, 8.0, sector);
             newStars.add(star);
-            posMap.put(note.getId(), pos);
+            notePosMap.put(note.getId(), pos);
         }
 
         // Recompute sector centroids for nebulae
@@ -733,7 +1082,7 @@ public class MainFrame extends JFrame {
             double cx = 0, cy = 0;
             int    cnt = 0;
             for (String nid : members) {
-                Vector2D p = newPositions.get(nid);
+                Vector2D p = notePosMap.get(nid);
                 if (p != null) { cx += p.getX(); cy += p.getY(); cnt++; }
             }
             if (cnt > 0) sector.setCentroid(new Vector2D(cx / cnt, cy / cnt));
@@ -745,28 +1094,30 @@ public class MainFrame extends JFrame {
             if (centroid == null) continue;
             double maxDist = 50.0;
             for (String nid : sector.getNoteIds()) {
-                Vector2D p = newPositions.get(nid);
+                Vector2D p = notePosMap.get(nid);
                 if (p != null) maxDist = Math.max(maxDist, centroid.distanceTo(p));
             }
             newNebulae.add(new Nebula(sector, centroid, maxDist * 1.5));
         }
 
-        List<Vector2D> worldPositions = new ArrayList<>(posMap.values());
+        // newPositions includes internal tree-node positions when in Tree mode,
+        // which EdgeLayer needs to resolve tree edge endpoints.
+        List<Vector2D> worldPositions = new ArrayList<>(notePosMap.values());
         new ArrayList<>(galaxyCanvas.getLayers()).forEach(galaxyCanvas::removeLayer);
         List<com.docgalaxy.model.celestial.CelestialBody> bodies = new ArrayList<>(newStars);
         bodies.addAll(newNebulae);
         galaxyCanvas.setBodies(bodies);
-        galaxyCanvas.setEdges(lastEdges);
+        galaxyCanvas.setEdges(displayEdges);
         galaxyCanvas.addLayer(new BackgroundLayer(worldPositions));
         galaxyCanvas.addLayer(new NebulaLayer(newNebulae));
         galaxyCanvas.addLayer(new StarLayer(newStars));
-        galaxyCanvas.addLayer(new EdgeLayer(lastEdges, posMap));
+        galaxyCanvas.addLayer(new EdgeLayer(displayEdges, new HashMap<>(newPositions)));
         galaxyCanvas.addLayer(new LabelLayer(newStars));
         galaxyCanvas.addLayer(new GalaxyOverlayLayer(newStars));
         galaxyCanvas.fitAll();
         galaxyCanvas.repaint();
 
-        lastPositions = new HashMap<>(newPositions);
+        lastPositions = new HashMap<>(notePosMap);
     }
 
     // ----------------------------------------------------------------

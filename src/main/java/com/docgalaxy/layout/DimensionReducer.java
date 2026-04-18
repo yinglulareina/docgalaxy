@@ -87,6 +87,10 @@ public class DimensionReducer {
         double[][] Xd = deflate(X, n, dim, ev1);
         double[] ev2  = powerIterate(Xd, n, dim, rng, ev1);
 
+        // 5. Sign normalization: make first non-zero element positive for consistency
+        fixSign(ev1);
+        fixSign(ev2);
+
         projectionMatrix = new double[][]{ev1, ev2};
         fittedCount      = n;
     }
@@ -251,6 +255,20 @@ public class DimensionReducer {
             for (int i = 0; i < v.length; i++) v[i] /= norm;
         }
         return norm;
+    }
+
+    /**
+     * Ensures the first non-zero element of the eigenvector is positive,
+     * removing the sign ambiguity inherent in power iteration.
+     */
+    private static void fixSign(double[] ev) {
+        for (double v : ev) {
+            if (v > 0) return;
+            if (v < 0) {
+                for (int i = 0; i < ev.length; i++) ev[i] = -ev[i];
+                return;
+            }
+        }
     }
 
     private static double dot(double[] a, double[] b) {

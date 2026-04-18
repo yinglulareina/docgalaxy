@@ -35,7 +35,7 @@ public class KMeansClusterStrategy implements ClusterStrategy {
      * @param k number of clusters; must be &ge; 1
      */
     public KMeansClusterStrategy(int k) {
-        this(k, System.nanoTime());
+        this(k, 42L);
     }
 
     /**
@@ -95,16 +95,51 @@ public class KMeansClusterStrategy implements ClusterStrategy {
     // Private helpers
     // -------------------------------------------------------------------------
 
-    /** Samples {@code count} distinct points without replacement as initial centroids. */
+    /**
+     * Selects initial centroids via K-Means++ for better spread.
+     *
+     * <ol>
+     *   <li>Pick the first centroid uniformly at random from the data points.</li>
+     *   <li>For each subsequent centroid, sample a point with probability proportional
+     *       to D(x)² where D(x) is the distance from x to the nearest already-chosen
+     *       centroid.</li>
+     * </ol>
+     */
     private List<Vector2D> initCentroids(List<Vector2D> points, int count) {
-        List<Integer> indices = new ArrayList<>(points.size());
-        for (int i = 0; i < points.size(); i++) indices.add(i);
-        Collections.shuffle(indices, new Random(seed));
+        Random rng = new Random(seed);
+        int n = points.size();
 
         List<Vector2D> centroids = new ArrayList<>(count);
-        for (int i = 0; i < count; i++) {
-            centroids.add(points.get(indices.get(i)));
+
+        // First centroid: uniformly random
+        centroids.add(points.get(rng.nextInt(n)));
+
+        double[] distances = new double[n];
+
+        for (int c = 1; c < count; c++) {
+            // Compute D(x)² for each point to nearest existing centroid
+            double totalWeight = 0;
+            for (int i = 0; i < n; i++) {
+                double minDist = Double.MAX_VALUE;
+                for (Vector2D centroid : centroids) {
+                    double d = points.get(i).distanceTo(centroid);
+                    if (d < minDist) minDist = d;
+                }
+                distances[i] = minDist * minDist;
+                totalWeight  += distances[i];
+            }
+
+            // Sample proportional to D(x)²
+            double threshold = rng.nextDouble() * totalWeight;
+            double cumulative = 0;
+            int chosen = n - 1; // fallback to last point
+            for (int i = 0; i < n; i++) {
+                cumulative += distances[i];
+                if (cumulative >= threshold) { chosen = i; break; }
+            }
+            centroids.add(points.get(chosen));
         }
+
         return centroids;
     }
 

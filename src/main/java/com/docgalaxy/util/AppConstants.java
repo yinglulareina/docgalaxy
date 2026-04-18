@@ -24,7 +24,7 @@ public final class AppConstants {
     // Rendering thresholds
     public static final double NEBULA_SHOW_THRESHOLD = 0.6;
     public static final double STAR_SHOW_THRESHOLD = 0.3;
-    public static final double LABEL_SHOW_THRESHOLD = 0.5;
+    public static final double LABEL_SHOW_THRESHOLD = 0.8;
     public static final float SEARCH_MASK_ALPHA = 100f / 255f;
     public static final int SEARCH_GLOW_RADIUS_MULTIPLIER = 5;
 

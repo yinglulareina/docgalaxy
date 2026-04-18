@@ -14,7 +14,7 @@ import java.util.Map;
  * hierarchical clustering (fine, within each coarse group).
  *
  * <h3>Phase 1 — K-Means coarse grouping</h3>
- * <p>Computes {@code K = max(3, ⌈√n⌉)} and delegates to {@link KMeansClusterStrategy}.
+ * <p>Computes {@code K = max(3, ⌈√n⌉ - 1)} and delegates to {@link KMeansClusterStrategy}.
  * K is automatically clamped by K-Means when fewer than K points are present.
  *
  * <h3>Phase 2 — Agglomerative HAC within each coarse group</h3>
@@ -30,9 +30,9 @@ public class HybridClusterStrategy implements ClusterStrategy {
 
     private final long seed;
 
-    /** Production constructor — uses a time-based seed. */
+    /** Production constructor — uses a fixed seed for reproducible results. */
     public HybridClusterStrategy() {
-        this(System.nanoTime());
+        this(42L);
     }
 
     /** Package-private deterministic constructor for tests. */
@@ -62,7 +62,7 @@ public class HybridClusterStrategy implements ClusterStrategy {
         if (n == 0) return Collections.emptyList();
 
         // --- Phase 1: K-Means coarse grouping ---
-        int k = Math.max(3, (int) Math.ceil(Math.sqrt(n)));
+        int k = Math.max(3, (int) Math.ceil(Math.sqrt(n)) - 1);
         List<Cluster> coarse = new KMeansClusterStrategy(k, seed).cluster(points, noteIds);
 
         // Build a lookup so we can retrieve the Vector2D for a note id in O(1)

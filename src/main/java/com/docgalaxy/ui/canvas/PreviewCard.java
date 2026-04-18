@@ -102,7 +102,7 @@ final class PreviewCard extends JPanel {
      * @param canvasH     canvas height for bottom-edge clamping (0 = unclamped)
      */
     void showFor(CelestialBody body, Point canvasPoint, int canvasW, int canvasH) {
-        maxSummaryLines = 3;
+        maxSummaryLines = 5;
         isEdgeCard = false;
 
         // ── content ──────────────────────────────────────────────────────────
@@ -123,9 +123,17 @@ final class PreviewCard extends JPanel {
             accentColor = ThemeManager.TEXT_ACCENT;
         }
 
-        // ── position ─────────────────────────────────────────────────────────
-        int w    = AppConstants.PREVIEW_CARD_WIDTH  + GLOW_PADDING * 2;
-        int h    = AppConstants.PREVIEW_CARD_HEIGHT + GLOW_PADDING * 2;
+        // ── position (dynamic height based on wrapped summary lines) ─────────
+        int  w     = AppConstants.PREVIEW_CARD_WIDTH + GLOW_PADDING * 2;
+        int  textW = AppConstants.PREVIEW_CARD_WIDTH - INSET * 2;
+        FontMetrics fm    = getFontMetrics(ThemeManager.FONT_BODY);
+        int  lines = (fm != null)
+                ? wrapText(summary, textW, fm, maxSummaryLines).size()
+                : maxSummaryLines;
+        int contentH = 25 + lines * 18 + 30;
+        contentH = Math.max(120, Math.min(280, contentH));
+        int  h    = contentH + GLOW_PADDING * 2;
+
         int maxX = (canvasW > 0) ? canvasW - w - 2 : 10_000;
         int maxY = (canvasH > 0) ? canvasH - h - 2 : 10_000;
         int x    = Math.max(2, Math.min(canvasPoint.x + CARD_OFFSET, maxX));
@@ -147,15 +155,23 @@ final class PreviewCard extends JPanel {
      * @param canvasH     canvas height for bottom-edge clamping (0 = unclamped)
      */
     void showHover(Star star, String snippet, Point canvasPoint, int canvasW, int canvasH) {
-        maxSummaryLines = 3;
+        maxSummaryLines = 5;
         isEdgeCard = false;
         title       = star.getNote().getFileName();
         summary     = snippet.isBlank() ? star.getNote().getFilePath() : snippet;
         sectorLabel = star.getSector().getLabel();
         accentColor = star.getSector().getColor();
 
-        int w    = AppConstants.PREVIEW_CARD_WIDTH  + GLOW_PADDING * 2;
-        int h    = AppConstants.PREVIEW_CARD_HEIGHT + GLOW_PADDING * 2;
+        int  w     = AppConstants.PREVIEW_CARD_WIDTH + GLOW_PADDING * 2;
+        int  textW = AppConstants.PREVIEW_CARD_WIDTH - INSET * 2;
+        FontMetrics fm    = getFontMetrics(ThemeManager.FONT_BODY);
+        int  lines = (fm != null)
+                ? wrapText(summary, textW, fm, maxSummaryLines).size()
+                : maxSummaryLines;
+        int contentH = 25 + lines * 18 + 30;
+        contentH = Math.max(120, Math.min(280, contentH));
+        int h    = contentH + GLOW_PADDING * 2;
+
         int maxX = (canvasW > 0) ? canvasW - w - 2 : 10_000;
         int maxY = (canvasH > 0) ? canvasH - h - 2 : 10_000;
         int x    = Math.max(2, Math.min(canvasPoint.x + CARD_OFFSET, maxX));
@@ -352,25 +368,70 @@ final class PreviewCard extends JPanel {
 
     /**
      * Wraps {@code text} into at most {@code maxLines} lines, each fitting
-     * within {@code maxW} pixels.  Long words are hard-clipped.
+     * within {@code maxW} pixels.
+     *
+     * <p>When the text overflows {@code maxLines}, the visible content is
+     * searched backward for the last sentence-ending character
+     * ({@code . ! ? 。！？}).  If found, the text is cut there and "…" is
+     * appended.  If no sentence boundary exists, the last space (word
+     * boundary) is used.  The result is then re-wrapped and returned.
      */
     private static List<String> wrapText(String text, int maxW, FontMetrics fm, int maxLines) {
         List<String> lines = new ArrayList<>();
         String[] words = text.split("\\s+");
         StringBuilder current = new StringBuilder();
+        boolean overflow = false;
+
         for (String word : words) {
+            if (word.isEmpty()) continue;
             String candidate = current.isEmpty() ? word : current + " " + word;
             if (fm.stringWidth(candidate) <= maxW) {
                 current = new StringBuilder(candidate);
             } else {
                 if (!current.isEmpty()) {
                     lines.add(current.toString());
-                    if (lines.size() >= maxLines) return lines;
+                    if (lines.size() >= maxLines) { overflow = true; break; }
                 }
-                current = new StringBuilder(word.length() > 0 ? word : "");
+                current = new StringBuilder(word);
             }
         }
-        if (!current.isEmpty() && lines.size() < maxLines) lines.add(current.toString());
-        return lines;
+        if (!overflow && !current.isEmpty()) lines.add(current.toString());
+        if (!overflow) return lines;
+
+        // ── Smart truncation ─────────────────────────────────────────────────
+        // Join all visible lines, then search backward for a sentence boundary.
+        String allVisible = String.join(" ", lines);
+        int cutAt = -1;
+        for (int i = allVisible.length() - 1; i >= 0; i--) {
+            char c = allVisible.charAt(i);
+            if (c == '.' || c == '!' || c == '?' || c == '。' || c == '！' || c == '？') {
+                cutAt = i + 1;   // include the punctuation character
+                break;
+            }
+        }
+        if (cutAt < 0) {
+            // No sentence boundary — fall back to last word boundary.
+            cutAt = allVisible.lastIndexOf(' ');
+            if (cutAt < 0) cutAt = allVisible.length();  // single long token
+        }
+
+        String truncated = allVisible.substring(0, cutAt).stripTrailing() + "…";
+
+        // Re-wrap the shorter truncated string (no recursive smart-truncation).
+        List<String> result = new ArrayList<>();
+        String[] tw = truncated.split("\\s+");
+        StringBuilder cur = new StringBuilder();
+        for (String word : tw) {
+            if (word.isEmpty()) continue;
+            String cand = cur.isEmpty() ? word : cur + " " + word;
+            if (fm.stringWidth(cand) <= maxW) {
+                cur = new StringBuilder(cand);
+            } else {
+                if (!cur.isEmpty()) result.add(cur.toString());
+                cur = new StringBuilder(word);
+            }
+        }
+        if (!cur.isEmpty()) result.add(cur.toString());
+        return result;
     }
 }

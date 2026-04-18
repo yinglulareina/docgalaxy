@@ -21,9 +21,9 @@ import java.util.TreeMap;
  *
  * <h3>Algorithm</h3>
  * <ol>
- *   <li><b>Centre selection</b> — the node with the highest <em>outgoing</em>
- *       KNN degree is chosen as the layout hub.  Ties are broken by total
- *       (outgoing + incoming) degree, then by position in the input list.</li>
+ *   <li><b>Centre selection</b> — the node with the highest KNN degree (most
+ *       outgoing neighbours) is chosen as the layout hub.  Ties are broken by
+ *       total (outgoing + incoming) degree, then by position in the input list.</li>
  *   <li><b>BFS ring assignment</b> — a standard breadth-first traversal
  *       starting at the centre assigns each reachable note a ring number equal
  *       to its shortest hop distance from the centre.  Ring 0 = centre,
@@ -31,24 +31,33 @@ import java.util.TreeMap;
  *   <li><b>Disconnected nodes</b> — notes not reachable from the centre via KNN
  *       edges are collected into one additional "overflow" ring just outside the
  *       last BFS ring.</li>
- *   <li><b>Radial placement</b> — ring radii are evenly spaced across the
- *       usable canvas radius ({@code min(W,H)/2 × (1 − 2×MARGIN)}).  Within
- *       each ring the notes are distributed at equal angular intervals,
- *       starting from the positive x-axis.</li>
+ *   <li><b>Radial placement</b> — rings are spaced {@value #RING_SPACING} px
+ *       apart from the centre.  Within each ring the notes are distributed at
+ *       equal angular intervals, starting from the positive x-axis.</li>
  * </ol>
  *
  * <p>{@link #isIterative()} returns {@code false} — the layout is computed in
  * a single deterministic pass.
+ *
+ * <p>After {@link #calculate} the caller may read {@link #getCenterPosition()}
+ * and {@link #getRingCount()} to construct a {@code RadialRingLayer} that draws
+ * the concentric reference circles.
  */
 public final class RadialLayout implements LayoutStrategy {
 
-    /** Fraction of each canvas half-extent reserved as margin. */
-    private static final double MARGIN = 0.10;
+    /** Fixed pixel distance between consecutive rings. */
+    public static final double RING_SPACING = 150.0;
 
     private static final double TWO_PI = 2.0 * Math.PI;
 
     private final double canvasWidth;
     private final double canvasHeight;
+
+    /** Set by {@link #calculate}; {@code null} until then. */
+    private Vector2D centerPosition;
+
+    /** Number of BFS rings (excluding ring 0 = centre); set by {@link #calculate}. */
+    private int ringCount;
 
     // -------------------------------------------------------------------------
     // Construction
@@ -81,7 +90,19 @@ public final class RadialLayout implements LayoutStrategy {
     // -------------------------------------------------------------------------
 
     /**
-     * Computes radial positions for all nodes.
+     * Computes radial positions for all nodes using parent-guided angle assignment.
+     *
+     * <ul>
+     *   <li>Ring 1 nodes are sorted by similarity to the centre (descending) and
+     *       distributed evenly around the full 360°.</li>
+     *   <li>Ring 2+ nodes inherit the angle of their BFS parent.  All children of
+     *       a given parent are spread within a sector of width
+     *       {@code min(30°, 360° / M)} centred on the parent's angle, where
+     *       {@code M} is the number of parents that have children in that ring.
+     *       This causes nodes in the same "lineage" to form a radial line.</li>
+     *   <li>Disconnected (overflow) nodes are distributed evenly on an extra ring
+     *       beyond the last BFS ring.</li>
+     * </ul>
      *
      * @param nodes nodes to lay out; must not be {@code null}
      * @return unmodifiable map from note-id to canvas position
@@ -90,11 +111,17 @@ public final class RadialLayout implements LayoutStrategy {
     @Override
     public Map<String, Vector2D> calculate(List<NodeData> nodes) {
         if (nodes == null) throw new IllegalArgumentException("nodes must not be null");
-        if (nodes.isEmpty()) return Collections.emptyMap();
+        if (nodes.isEmpty()) {
+            centerPosition = null;
+            ringCount = 0;
+            return Collections.emptyMap();
+        }
 
         Vector2D centre = new Vector2D(canvasWidth / 2.0, canvasHeight / 2.0);
+        centerPosition = centre;
 
         if (nodes.size() == 1) {
+            ringCount = 0;
             return Map.of(nodes.get(0).getNoteId(), centre);
         }
 
@@ -105,30 +132,31 @@ public final class RadialLayout implements LayoutStrategy {
         // --- Step 1: centre selection ---
         String centreId = pickCentre(nodes);
 
-        // --- Step 2: BFS ring assignment ---
-        // LinkedHashMap preserves insertion order (BFS order) for deterministic tests
-        Map<String, Integer> ringOf = new LinkedHashMap<>(nodes.size() * 2);
+        // --- Step 2: BFS ring assignment + parent tracking ---
+        Map<String, Integer> ringOf   = new LinkedHashMap<>(nodes.size() * 2);
+        Map<String, String>  parentOf = new HashMap<>(nodes.size() * 2);
         ringOf.put(centreId, 0);
 
         Queue<String> queue = new ArrayDeque<>();
         queue.add(centreId);
 
         while (!queue.isEmpty()) {
-            String current  = queue.poll();
-            NodeData nd     = nodeById.get(current);
+            String current = queue.poll();
+            NodeData nd    = nodeById.get(current);
             if (nd == null) continue;
-            int nextRing    = ringOf.get(current) + 1;
+            int nextRing = ringOf.get(current) + 1;
             for (Neighbor nb : nd.getNeighbors()) {
                 String nbId = nb.getNoteId();
                 if (!ringOf.containsKey(nbId) && nodeById.containsKey(nbId)) {
                     ringOf.put(nbId, nextRing);
+                    parentOf.put(nbId, current);
                     queue.add(nbId);
                 }
             }
         }
 
         // --- Step 3: overflow ring for disconnected nodes ---
-        int maxBfsRing = ringOf.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+        int maxBfsRing  = ringOf.values().stream().mapToInt(Integer::intValue).max().orElse(0);
         int overflowRing = maxBfsRing + 1;
         for (NodeData nd : nodes) {
             if (!ringOf.containsKey(nd.getNoteId())) {
@@ -136,39 +164,110 @@ public final class RadialLayout implements LayoutStrategy {
             }
         }
 
-        // Group by ring (TreeMap sorts rings 0,1,2,…)
+        // Group by ring (TreeMap sorts rings 0, 1, 2, …)
         NavigableMap<Integer, List<String>> ringMembers = new TreeMap<>();
         for (Map.Entry<String, Integer> e : ringOf.entrySet()) {
             ringMembers.computeIfAbsent(e.getValue(), k -> new ArrayList<>()).add(e.getKey());
         }
 
         int maxRing = ringMembers.lastKey();
+        ringCount = maxRing;
 
-        // Usable radius: from canvas centre to the outermost ring
-        double usableRadius = Math.min(canvasWidth, canvasHeight) / 2.0 * (1.0 - 2.0 * MARGIN);
 
-        // --- Step 4: assign canvas positions ---
-        Map<String, Vector2D> result = new HashMap<>(nodes.size() * 2);
 
-        for (Map.Entry<Integer, List<String>> e : ringMembers.entrySet()) {
-            int    r          = e.getKey();
-            List<String> ids  = e.getValue();
+        // Build sector and similarity-to-centre lookups used for sorting
+        Map<String, String> sectorOf = new HashMap<>(nodes.size() * 2);
+        for (NodeData nd : nodes) sectorOf.put(nd.getNoteId(), nd.getSectorId());
 
-            if (r == 0) {
-                // Centre node sits exactly at the canvas centre
-                result.put(ids.get(0), centre);
-                continue;
+        Map<String, Double> simFromCentre = new HashMap<>();
+        NodeData centreNode = nodeById.get(centreId);
+        if (centreNode != null) {
+            for (Neighbor nb : centreNode.getNeighbors()) {
+                simFromCentre.put(nb.getNoteId(), nb.getSimilarity());
+            }
+        }
+
+        // --- Step 4: parent-guided angle assignment ---
+        Map<String, Vector2D> result  = new HashMap<>(nodes.size() * 2);
+        Map<String, Double>   angleOf = new HashMap<>(nodes.size() * 2);
+
+        // Ring 0: centre node
+        result.put(centreId, centre);
+
+        // Ring 1: sector-grouped, within each sector sorted by sim-to-centre desc,
+        //         then distributed evenly around the full 360°.
+        List<String> ring1 = ringMembers.getOrDefault(1, Collections.emptyList());
+        if (!ring1.isEmpty()) {
+            List<String> sorted1 = sortBySectorThenSim(ring1, sectorOf, simFromCentre);
+
+            int    N       = sorted1.size();
+            double radius1 = RING_SPACING;
+            for (int i = 0; i < N; i++) {
+                double angle = TWO_PI * i / N;
+                String id    = sorted1.get(i);
+                angleOf.put(id, angle);
+                result.put(id, new Vector2D(
+                        centre.getX() + radius1 * Math.cos(angle),
+                        centre.getY() + radius1 * Math.sin(angle)));
+
+            }
+        }
+
+        // Ring 2+: children inherit parent angle, spread within a sector.
+        //          Within each parent's children, apply sector-then-sim ordering.
+        for (int r = 2; r <= maxBfsRing; r++) {
+            List<String> members = ringMembers.getOrDefault(r, Collections.emptyList());
+            if (members.isEmpty()) continue;
+
+            double radius = r * RING_SPACING;
+
+            // Group children by their BFS parent (LinkedHashMap preserves BFS order)
+            Map<String, List<String>> byParent = new LinkedHashMap<>();
+            for (String id : members) {
+                String p = parentOf.get(id);
+                if (p != null) byParent.computeIfAbsent(p, k -> new ArrayList<>()).add(id);
             }
 
-            double radius = (maxRing > 0) ? (double) r / maxRing * usableRadius
-                                          : usableRadius;
-            int    count  = ids.size();
+            // Sector width: narrow enough that children of different parents don't overlap
+            int    M           = byParent.size();  // number of active parents in this ring
+            double sectorWidth = Math.min(Math.PI / 6.0, TWO_PI / Math.max(1, M));
 
+            for (Map.Entry<String, List<String>> entry : byParent.entrySet()) {
+                String       parent   = entry.getKey();
+                List<String> children = sortBySectorThenSim(entry.getValue(), sectorOf, simFromCentre);
+                double parentAngle    = angleOf.getOrDefault(parent, 0.0);
+                int    k              = children.size();
+
+                for (int i = 0; i < k; i++) {
+                    double childAngle = (k == 1)
+                            ? parentAngle
+                            : parentAngle - sectorWidth / 2.0 + i * sectorWidth / (k - 1.0);
+                    // Normalize to [0, 2π)
+                    childAngle = ((childAngle % TWO_PI) + TWO_PI) % TWO_PI;
+
+                    String id = children.get(i);
+                    angleOf.put(id, childAngle);
+                    result.put(id, new Vector2D(
+                            centre.getX() + radius * Math.cos(childAngle),
+                            centre.getY() + radius * Math.sin(childAngle)));
+
+                }
+            }
+        }
+
+        // Overflow ring: sector-grouped, then sim desc, distributed evenly
+        List<String> overflow = ringMembers.getOrDefault(overflowRing, Collections.emptyList());
+        if (!overflow.isEmpty()) {
+            List<String> sortedOF = sortBySectorThenSim(overflow, sectorOf, simFromCentre);
+            double radius = overflowRing * RING_SPACING;
+            int    count  = sortedOF.size();
             for (int i = 0; i < count; i++) {
                 double angle = TWO_PI * i / count;
-                double x = centre.getX() + radius * Math.cos(angle);
-                double y = centre.getY() + radius * Math.sin(angle);
-                result.put(ids.get(i), new Vector2D(x, y));
+                String id    = sortedOF.get(i);
+                angleOf.put(id, angle);
+                result.put(id, new Vector2D(
+                        centre.getX() + radius * Math.cos(angle),
+                        centre.getY() + radius * Math.sin(angle)));
             }
         }
 
@@ -184,8 +283,51 @@ public final class RadialLayout implements LayoutStrategy {
     public String getName() { return "Radial"; }
 
     // -------------------------------------------------------------------------
+    // Post-calculate accessors (consumed by RadialRingLayer)
+    // -------------------------------------------------------------------------
+
+    /**
+     * World-space position of the centre node, set after the most recent
+     * {@link #calculate} call.  Returns {@code null} if {@code calculate}
+     * has not been called yet.
+     */
+    public Vector2D getCenterPosition() { return centerPosition; }
+
+    /**
+     * Number of rings (excluding ring 0 = centre node), set after the most
+     * recent {@link #calculate} call.  Used to determine how many concentric
+     * circles the {@code RadialRingLayer} should draw.
+     */
+    public int getRingCount() { return ringCount; }
+
+    // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /**
+     * Returns a new list containing the same IDs sorted by:
+     * <ol>
+     *   <li>Sector ID (lexicographic) — nodes in the same sector are adjacent.</li>
+     *   <li>Similarity to the centre node (descending) — most similar first within
+     *       each sector.</li>
+     * </ol>
+     */
+    private static List<String> sortBySectorThenSim(List<String> ids,
+                                                     Map<String, String> sectorOf,
+                                                     Map<String, Double> simFromCentre) {
+        List<String> sorted = new ArrayList<>(ids);
+        sorted.sort((a, b) -> {
+            String sA = sectorOf.getOrDefault(a, "");
+            String sB = sectorOf.getOrDefault(b, "");
+            int cmp = sA.compareTo(sB);
+            if (cmp != 0) return cmp;
+            // Within same sector: higher similarity first
+            return Double.compare(
+                    simFromCentre.getOrDefault(b, 0.0),
+                    simFromCentre.getOrDefault(a, 0.0));
+        });
+        return sorted;
+    }
 
     /**
      * Selects the hub node using a two-level priority:

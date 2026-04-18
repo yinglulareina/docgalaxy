@@ -477,7 +477,7 @@ public final class CanvasInteractionHandler extends MouseAdapter
     private static String readSnippet(String filePath, int maxChars) {
         try {
             String content = java.nio.file.Files.readString(java.nio.file.Path.of(filePath));
-            return content.length() <= maxChars ? content : content.substring(0, maxChars) + "…";
+            return content;
         } catch (Exception e) {
             return "";
         }

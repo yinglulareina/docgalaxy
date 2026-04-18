@@ -39,7 +39,7 @@ public final class LabelLayer implements RenderLayer {
     static final double SHOW_THRESHOLD = AppConstants.LABEL_SHOW_THRESHOLD; // 0.5
 
     /** Zoom range over which labels fade from invisible to fully opaque. */
-    static final double FADE_RANGE = 0.3;
+    static final double FADE_RANGE = 0.2;
 
     /** Pixel gap between the bottom of the star circle and the top of the label. */
     private static final int LABEL_GAP = 2;

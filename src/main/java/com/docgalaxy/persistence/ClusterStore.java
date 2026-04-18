@@ -6,6 +6,8 @@ import com.docgalaxy.model.Vector2D;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
+import java.awt.Color;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -74,6 +76,8 @@ public class ClusterStore extends AbstractStore<List<Cluster>> {
             r.centroidY     = c.getCentroid().getY();
             r.memberNoteIds = new ArrayList<>(c.getMemberNoteIds());
             r.dendrogram    = toNodeRecord(c.getDendrogram());
+            r.colorRgb      = c.getColor() != null ? c.getColor().getRGB() : 0;
+            r.label         = c.getLabel();
             records.add(r);
         }
         return records;
@@ -82,11 +86,14 @@ public class ClusterStore extends AbstractStore<List<Cluster>> {
     private static List<Cluster> toClusters(List<ClusterRecord> records) {
         List<Cluster> clusters = new ArrayList<>();
         for (ClusterRecord r : records) {
-            Vector2D      centroid   = new Vector2D(r.centroidX, r.centroidY);
+            Vector2D       centroid   = new Vector2D(r.centroidX, r.centroidY);
             DendrogramNode dendrogram = toNode(r.dendrogram);
-            clusters.add(new Cluster(centroid,
+            Cluster cluster = new Cluster(centroid,
                 r.memberNoteIds != null ? r.memberNoteIds : new ArrayList<>(),
-                dendrogram));
+                dendrogram);
+            if (r.colorRgb != 0) cluster.setColor(new Color(r.colorRgb, true));
+            if (r.label    != null) cluster.setLabel(r.label);
+            clusters.add(cluster);
         }
         return clusters;
     }
@@ -124,6 +131,8 @@ public class ClusterStore extends AbstractStore<List<Cluster>> {
         double       centroidY;
         List<String> memberNoteIds;
         NodeRecord   dendrogram;
+        int          colorRgb;   // java.awt.Color.getRGB() — 0 means "not set"
+        String       label;      // LLM-assigned sector name; null means not yet set
     }
 
     private static class NodeRecord {
