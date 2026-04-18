@@ -9,6 +9,7 @@ import com.docgalaxy.ui.ThemeManager;
 import com.formdev.flatlaf.FlatDarkLaf;
 
 import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -17,6 +18,15 @@ public class App {
 
     public static void main(String[] args) {
         FlatDarkLaf.setup();
+
+        // FlatLaf global rounded-corner settings
+        UIManager.put("Component.arc",        8);
+        UIManager.put("TextComponent.arc",    8);
+        UIManager.put("Button.arc",           8);
+        UIManager.put("ComboBox.arc",         8);
+        UIManager.put("TabbedPane.tabArc",    8);
+        UIManager.put("TabbedPane.tabSelectionArc", 8);
+
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame();
             frame.setVisible(true);

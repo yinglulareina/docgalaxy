@@ -6,11 +6,15 @@ import com.docgalaxy.ai.navigator.NavigatorService;
 import com.docgalaxy.ai.navigator.RouteStep;
 import com.docgalaxy.model.KnowledgeBase;
 import com.docgalaxy.ui.ThemeManager;
-import com.docgalaxy.util.AppConstants;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -31,12 +35,14 @@ import java.util.stream.Collectors;
  */
 public class NavigatorPanel extends JPanel {
 
-    private static final Color USER_BG = new Color(0x1F, 0x3B, 0x5A);
-    private static final Color AI_BG   = new Color(0x2A, 0x1F, 0x3B);
+    private static final Color USER_BG = ThemeManager.CHAT_USER_BG;
+    private static final Color AI_BG   = ThemeManager.CHAT_AI_BG;
 
-    private final JPanel     chatBox;
+    private static final int HEADER_HEIGHT = 34;
+
+    private final JPanel      chatBox;
     private final JScrollPane chatScroll;
-    private JTextField  inputField;
+    private       JTextArea   inputArea;
     private final JButton     collapseBtn;
     private final JPanel      bodyPanel;
 
@@ -44,11 +50,13 @@ public class NavigatorPanel extends JPanel {
     private NavigatorService   navigatorService;
     private KnowledgeBase      knowledgeBase;
     private LearningStyle      learningStyle   = LearningStyle.OVERVIEW_FIRST;
-    private Consumer<Set<String>> onHighlight;   // callback → highlight note IDs on canvas
+    private Consumer<Set<String>>  onHighlight;   // callback → highlight note IDs on canvas
+    private Consumer<List<String>> onShowRoute;   // callback → draw ordered route on canvas
 
     public NavigatorPanel() {
         setLayout(new BorderLayout());
         setBackground(ThemeManager.BG_SECONDARY);
+        setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 
         // ---- Header ----
         JPanel header = buildHeader();
@@ -99,6 +107,10 @@ public class NavigatorPanel extends JPanel {
         this.onHighlight = callback;
     }
 
+    public void setOnShowRoute(Consumer<List<String>> callback) {
+        this.onShowRoute = callback;
+    }
+
     // ----------------------------------------------------------------
     // Header (collapse toggle)
     // ----------------------------------------------------------------
@@ -141,6 +153,8 @@ public class NavigatorPanel extends JPanel {
         bodyPanel.setVisible(!collapsed);
         title.setText(collapsed ? "▸ AI NAVIGATOR" : "▾ AI NAVIGATOR");
         toggle.setText(collapsed ? "+" : "−");
+        setMaximumSize(new Dimension(Integer.MAX_VALUE,
+            collapsed ? HEADER_HEIGHT : Integer.MAX_VALUE));
         revalidate();
     }
 
@@ -153,16 +167,50 @@ public class NavigatorPanel extends JPanel {
         row.setBackground(ThemeManager.BG_SECONDARY);
         row.setBorder(new EmptyBorder(4, 8, 8, 8));
 
-        inputField = new JTextField();
-        inputField.setFont(ThemeManager.FONT_BODY);
-        inputField.setForeground(ThemeManager.TEXT_PRIMARY);
-        inputField.setBackground(ThemeManager.BG_SURFACE);
-        inputField.setCaretColor(ThemeManager.TEXT_ACCENT);
-        inputField.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(ThemeManager.BG_SURFACE),
-            new EmptyBorder(4, 8, 4, 8)
-        ));
-        inputField.addActionListener(e -> submitQuery());
+        inputArea = new JTextArea(1, 0);
+        inputArea.setFont(ThemeManager.FONT_BODY);
+        inputArea.setForeground(ThemeManager.TEXT_PRIMARY);
+        inputArea.setBackground(ThemeManager.BG_SURFACE);
+        inputArea.setCaretColor(ThemeManager.TEXT_ACCENT);
+        inputArea.setLineWrap(true);
+        inputArea.setWrapStyleWord(true);
+        inputArea.setBorder(new EmptyBorder(4, 8, 4, 8));
+        inputArea.putClientProperty("JTextField.placeholderText",
+                "e.g. Help me plan a study path for...");
+
+        // Enter submits; Shift+Enter inserts newline
+        inputArea.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_ENTER && !e.isShiftDown()) {
+                    e.consume();
+                    submitQuery();
+                }
+            }
+        });
+
+        // Auto-grow 1→3 rows as content grows
+        inputArea.getDocument().addDocumentListener(new DocumentListener() {
+            private void adjustRows() {
+                SwingUtilities.invokeLater(() -> {
+                    int lines = Math.max(1, Math.min(3, inputArea.getLineCount()));
+                    if (inputArea.getRows() != lines) {
+                        inputArea.setRows(lines);
+                        Container p = row.getParent();
+                        while (p != null) { p.revalidate(); p = p.getParent(); }
+                    }
+                });
+            }
+            @Override public void insertUpdate(DocumentEvent e)  { adjustRows(); }
+            @Override public void removeUpdate(DocumentEvent e)  { adjustRows(); }
+            @Override public void changedUpdate(DocumentEvent e) { adjustRows(); }
+        });
+
+        JScrollPane inputScroll = new JScrollPane(inputArea);
+        inputScroll.setBorder(BorderFactory.createLineBorder(ThemeManager.BG_SURFACE));
+        inputScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER);
+        inputScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        inputScroll.getViewport().setBackground(ThemeManager.BG_SURFACE);
 
         JButton askBtn = new JButton("Ask");
         askBtn.setFont(ThemeManager.FONT_BODY);
@@ -172,8 +220,8 @@ public class NavigatorPanel extends JPanel {
         askBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         askBtn.addActionListener(e -> submitQuery());
 
-        row.add(inputField, BorderLayout.CENTER);
-        row.add(askBtn,     BorderLayout.EAST);
+        row.add(inputScroll, BorderLayout.CENTER);
+        row.add(askBtn,      BorderLayout.EAST);
 
         return row;
     }
@@ -183,9 +231,9 @@ public class NavigatorPanel extends JPanel {
     // ----------------------------------------------------------------
 
     private void submitQuery() {
-        String query = inputField.getText().trim();
+        String query = inputArea.getText().trim();
         if (query.isEmpty()) return;
-        inputField.setText("");
+        inputArea.setText("");
 
         addMessage(query, true);
 
@@ -217,13 +265,38 @@ public class NavigatorPanel extends JPanel {
 
     private void displayResult(NavigationResult result) {
         SwingUtilities.invokeLater(() -> {
-            addMessage(result.getSummary(), false);
+            List<RouteStep> sorted = result.getRoute().stream()
+                .sorted(java.util.Comparator.comparingInt(RouteStep::getOrder))
+                .collect(Collectors.toList());
 
-            // Highlight notes on canvas
-            Set<String> ids = result.getRoute().stream()
-                .map(RouteStep::getNoteId)
-                .collect(Collectors.toSet());
+            StringBuilder sb = new StringBuilder(result.getSummary());
+
+            if (!sorted.isEmpty()) {
+                sb.append("\n\nStudy Path:");
+                for (int i = 0; i < sorted.size(); i++) {
+                    RouteStep step = sorted.get(i);
+                    String fileName = step.getNoteId();
+                    if (knowledgeBase != null) {
+                        com.docgalaxy.model.Note note = knowledgeBase.getNote(step.getNoteId());
+                        if (note != null) fileName = note.getFileName();
+                    }
+                    String reason = (step.getReason() != null && !step.getReason().isBlank())
+                            ? step.getReason() : "Relevant to your query";
+                    sb.append("\n").append(i + 1).append(". ").append(fileName)
+                      .append(" \u2014 ").append(reason);
+                }
+            }
+
+            if (result.getEstimatedTime() != null && !result.getEstimatedTime().isBlank()) {
+                sb.append("\n\nEstimated time: ").append(result.getEstimatedTime());
+            }
+
+            addMessage(sb.toString(), false);
+
+            List<String> routeIds = sorted.stream().map(RouteStep::getNoteId).collect(Collectors.toList());
+            Set<String> ids = Set.copyOf(routeIds);
             if (onHighlight != null) onHighlight.accept(ids);
+            if (onShowRoute != null) onShowRoute.accept(routeIds);
         });
     }
 
@@ -258,7 +331,7 @@ public class NavigatorPanel extends JPanel {
         wrapper.setBackground(ThemeManager.BG_SECONDARY);
         wrapper.setOpaque(false);
 
-        area.setMaximumSize(new Dimension(AppConstants.NAVIGATOR_PANEL_WIDTH, Integer.MAX_VALUE));
+        area.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
         wrapper.add(area);
         return wrapper;
     }

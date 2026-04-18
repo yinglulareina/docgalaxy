@@ -18,6 +18,7 @@ public class SectorListPanel extends JPanel {
 
     private final DefaultListModel<Sector> listModel = new DefaultListModel<>();
     private final JList<Sector>            list;
+    private final JScrollPane              scroll;
     private Consumer<Sector> onSectorSelected;
 
     public SectorListPanel() {
@@ -39,6 +40,7 @@ public class SectorListPanel extends JPanel {
         list.setSelectionForeground(ThemeManager.TEXT_PRIMARY);
         list.setFixedCellHeight(32);
 
+        list.setVisibleRowCount(0);
         list.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && onSectorSelected != null) {
                 Sector selected = list.getSelectedValue();
@@ -46,11 +48,11 @@ public class SectorListPanel extends JPanel {
             }
         });
 
-        JScrollPane scroll = new JScrollPane(list);
+        scroll = new JScrollPane(list);
         scroll.setBorder(null);
         scroll.setBackground(ThemeManager.BG_SECONDARY);
         scroll.getViewport().setBackground(ThemeManager.BG_SECONDARY);
-        scroll.setPreferredSize(new Dimension(0, 120));
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER);
         add(scroll, BorderLayout.CENTER);
     }
 
@@ -66,12 +68,23 @@ public class SectorListPanel extends JPanel {
     // Data refresh
     // ----------------------------------------------------------------
 
+    @Override
+    public Dimension getMaximumSize() {
+        Dimension pref = getPreferredSize();
+        return new Dimension(Integer.MAX_VALUE, pref.height);
+    }
+
     public void refresh(KnowledgeBase kb) {
         listModel.clear();
-        if (kb == null) return;
-        for (Sector s : kb.getSectors()) {
-            listModel.addElement(s);
+        if (kb != null) {
+            for (Sector s : kb.getSectors()) listModel.addElement(s);
         }
+        int count = listModel.size();
+        list.setVisibleRowCount(Math.min(Math.max(count, 0), 8));
+        scroll.setVerticalScrollBarPolicy(count > 8
+            ? ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
+            : ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER);
+        revalidate();
     }
 
     // ----------------------------------------------------------------

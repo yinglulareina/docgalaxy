@@ -82,7 +82,7 @@ public class SettingsDialog extends JDialog {
         tabs.setBackground(ThemeManager.BG_SECONDARY);
         tabs.setForeground(ThemeManager.TEXT_PRIMARY);
         tabs.addTab("AI Provider", buildAITab());
-        tabs.addTab("Appearance",  buildAppearanceTab());
+        tabs.addTab("Learning Style", buildAppearanceTab());
 
         root.add(tabs, BorderLayout.CENTER);
         root.add(buildButtons(), BorderLayout.SOUTH);

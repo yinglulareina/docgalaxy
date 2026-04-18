@@ -8,6 +8,7 @@ import com.docgalaxy.ai.OpenAIEmbeddingProvider;
 import com.docgalaxy.ai.VectorDatabase;
 import com.docgalaxy.ai.cluster.Cluster;
 import com.docgalaxy.ai.cluster.HybridClusterStrategy;
+import com.docgalaxy.ai.navigator.LearningStyle;
 import com.docgalaxy.ai.navigator.NavigatorService;
 import com.docgalaxy.ai.navigator.RAGNavigator;
 import com.docgalaxy.layout.DimensionReducer;
@@ -69,7 +70,7 @@ import java.util.stream.Collectors;
  *
  * Layout (BorderLayout):
  *   NORTH  → ToolBar
- *   CENTER → JSplitPane( Sidebar [240px] | GalaxyCanvas )
+ *   CENTER → JSplitPane( Sidebar [min 240px, resizable] | GalaxyCanvas )
  *   SOUTH  → StatusBar
  */
 public class MainFrame extends JFrame {
@@ -135,7 +136,8 @@ public class MainFrame extends JFrame {
             galaxyCanvas
         );
         split.setDividerLocation(AppConstants.SIDEBAR_WIDTH);
-        split.setDividerSize(1);
+        split.setDividerSize(5);         // grabbable divider
+        split.setResizeWeight(0.0);      // canvas absorbs all extra space on resize
         split.setBorder(null);
         split.setBackground(ThemeManager.BG_PRIMARY);
         add(split, BorderLayout.CENTER);
@@ -221,6 +223,7 @@ public class MainFrame extends JFrame {
                 + " (add more content to index)"));
 
         sidebar.setOnNavigatorHighlight(galaxyCanvas::highlightNotes);
+        sidebar.setOnNavigatorShowRoute(galaxyCanvas::showNavigationRoute);
     }
 
     // ----------------------------------------------------------------
@@ -331,7 +334,13 @@ public class MainFrame extends JFrame {
         toolBar.setOnSettings(() -> {
             if (currentStoreDir != null) {
                 SettingsDialog dlg = new SettingsDialog(this, currentStoreDir);
-                dlg.setOnSaved(cfg -> statusBar.setStatus("Settings saved"));
+                dlg.setOnSaved(cfg -> {
+                    statusBar.setStatus("Settings saved");
+                    try {
+                        LearningStyle ls = LearningStyle.valueOf(cfg.getLearningStyle());
+                        sidebar.getNavigatorPanel().setLearningStyle(ls);
+                    } catch (IllegalArgumentException ignored) {}
+                });
                 dlg.setVisible(true);
             } else {
                 JOptionPane.showMessageDialog(this,

@@ -10,12 +10,12 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.MatteBorder;
 import java.awt.*;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 
 /**
- * Left sidebar (fixed 240 px wide).
+ * Left sidebar (adaptive width, minimum {@link AppConstants#SIDEBAR_WIDTH} px).
  *
  * Layout (top → bottom, BoxLayout.Y_AXIS):
  *   SearchPanel
@@ -36,9 +36,7 @@ public class Sidebar extends JPanel {
     public Sidebar() {
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBackground(ThemeManager.BG_SECONDARY);
-        setPreferredSize(new Dimension(AppConstants.SIDEBAR_WIDTH, 0));
         setMinimumSize(new Dimension(AppConstants.SIDEBAR_WIDTH, 0));
-        setMaximumSize(new Dimension(AppConstants.SIDEBAR_WIDTH, Integer.MAX_VALUE));
         setBorder(new MatteBorder(0, 0, 0, 1, ThemeManager.BG_SURFACE));
 
         searchPanel     = new SearchPanel();
@@ -46,22 +44,25 @@ public class Sidebar extends JPanel {
         incubatorPanel  = new IncubatorPanel();
         navigatorPanel  = new NavigatorPanel();
 
-        // Make each child fill the full width
         makeFullWidth(searchPanel);
         makeFullWidth(sectorListPanel);
         makeFullWidth(incubatorPanel);
         makeFullWidth(navigatorPanel);
 
         add(searchPanel);
+        add(Box.createVerticalStrut(4));
         add(separator());
+        add(Box.createVerticalStrut(4));
         add(sectorListPanel);
+        add(Box.createVerticalStrut(4));
         add(separator());
+        add(Box.createVerticalStrut(4));
         add(incubatorPanel);
+        add(Box.createVerticalStrut(4));
         add(separator());
-        add(navigatorPanel);
-
-        // Filler so the panels don't stretch to fill height
+        add(Box.createVerticalStrut(4));
         add(Box.createVerticalGlue());
+        add(navigatorPanel);
     }
 
     // ----------------------------------------------------------------
@@ -86,6 +87,10 @@ public class Sidebar extends JPanel {
 
     public void setOnNavigatorHighlight(Consumer<Set<String>> callback) {
         navigatorPanel.setOnHighlight(callback);
+    }
+
+    public void setOnNavigatorShowRoute(Consumer<List<String>> callback) {
+        navigatorPanel.setOnShowRoute(callback);
     }
 
     // ----------------------------------------------------------------
@@ -114,14 +119,13 @@ public class Sidebar extends JPanel {
 
     private static void makeFullWidth(JComponent c) {
         c.setAlignmentX(Component.LEFT_ALIGNMENT);
-        c.setMaximumSize(new Dimension(AppConstants.SIDEBAR_WIDTH, c.getMaximumSize().height));
     }
 
     private static JSeparator separator() {
         JSeparator sep = new JSeparator();
         sep.setForeground(ThemeManager.BG_SURFACE);
         sep.setBackground(ThemeManager.BG_SURFACE);
-        sep.setMaximumSize(new Dimension(AppConstants.SIDEBAR_WIDTH, 1));
+        sep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
         return sep;
     }
 }

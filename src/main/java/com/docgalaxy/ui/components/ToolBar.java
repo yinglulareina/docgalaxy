@@ -38,7 +38,7 @@ public class ToolBar extends JToolBar {
         setBackground(ThemeManager.BG_SECONDARY);
         setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(0x2A2A4A)));
 
-        JButton openBtn = createButton("Open KB");
+        JButton openBtn = createButton("Open");
         openBtn.addActionListener(e -> handleOpenKB());
         add(openBtn);
 

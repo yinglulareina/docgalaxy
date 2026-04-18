@@ -13,9 +13,12 @@ import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.RenderingHints;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 
@@ -32,6 +35,9 @@ import java.util.function.Consumer;
  *   setOnDemoSelected(Runnable)         – called when "Open Demo KB" is clicked
  */
 public class WelcomeOverlay extends JDialog {
+
+    private static final Color ACCENT      = new Color(0x00, 0x7A, 0xCC);  // VS Code blue
+    private static final int   CARD_RADIUS = 16;
 
     private Consumer<Path> onFolderSelected;
     private Runnable       onDemoSelected;
@@ -57,12 +63,23 @@ public class WelcomeOverlay extends JDialog {
     // ----------------------------------------------------------------
 
     private void initComponents() {
-        JPanel card = new JPanel(new GridBagLayout());
-        card.setBackground(ThemeManager.BG_SURFACE);
-        card.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(0x3A3A6A), 1),
-            BorderFactory.createEmptyBorder(44, 56, 44, 56)
-        ));
+        // Rounded-corner card drawn via paintComponent; transparent border provides padding.
+        JPanel card = new JPanel(new GridBagLayout()) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                // Fill
+                g2.setColor(ThemeManager.BG_SURFACE);
+                g2.fillRoundRect(0, 0, getWidth(), getHeight(), CARD_RADIUS * 2, CARD_RADIUS * 2);
+                // Border stroke
+                g2.setColor(ACCENT.darker());
+                g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, CARD_RADIUS * 2, CARD_RADIUS * 2);
+                g2.dispose();
+            }
+        };
+        card.setOpaque(false);
+        card.setBorder(BorderFactory.createEmptyBorder(44, 56, 44, 56));
 
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.gridx = 0;
@@ -72,7 +89,7 @@ public class WelcomeOverlay extends JDialog {
         // Title
         JLabel title = new JLabel("DocGalaxy");
         title.setFont(new Font("Inter", Font.BOLD, 30));
-        title.setForeground(ThemeManager.TEXT_ACCENT);
+        title.setForeground(ACCENT);
         title.setHorizontalAlignment(JLabel.CENTER);
         gbc.gridy  = 0;
         gbc.insets = new Insets(0, 0, 6, 0);
@@ -134,8 +151,8 @@ public class WelcomeOverlay extends JDialog {
 
     private JButton primaryButton(String text) {
         JButton btn = new JButton(text);
-        btn.setBackground(ThemeManager.TEXT_ACCENT);
-        btn.setForeground(ThemeManager.BG_PRIMARY);
+        btn.setBackground(ACCENT);
+        btn.setForeground(Color.WHITE);
         btn.setFont(ThemeManager.FONT_BODY.deriveFont(Font.BOLD));
         btn.setFocusPainted(false);
         btn.setBorderPainted(false);
@@ -151,7 +168,7 @@ public class WelcomeOverlay extends JDialog {
         btn.setFont(ThemeManager.FONT_BODY);
         btn.setFocusPainted(false);
         btn.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(0x3A3A6A), 1),
+            BorderFactory.createLineBorder(ACCENT, 1),
             BorderFactory.createEmptyBorder(5, 12, 5, 12)
         ));
         btn.setPreferredSize(new Dimension(300, 42));

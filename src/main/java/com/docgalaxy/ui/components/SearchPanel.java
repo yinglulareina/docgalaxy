@@ -21,10 +21,15 @@ public class SearchPanel extends JPanel {
     private       Runnable         onClear;
     private       Timer            debounce;
 
+    @Override
+    public Dimension getMaximumSize() {
+        return new Dimension(Integer.MAX_VALUE, 45);
+    }
+
     public SearchPanel() {
         setLayout(new BorderLayout());
         setBackground(ThemeManager.BG_SECONDARY);
-        setBorder(new EmptyBorder(8, 8, 8, 8));
+        setBorder(new EmptyBorder(6, 8, 6, 8));
 
         searchField = buildField();
         add(searchField, BorderLayout.CENTER);

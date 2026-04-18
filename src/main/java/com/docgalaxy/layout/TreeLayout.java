@@ -61,10 +61,9 @@ public final class TreeLayout implements LayoutStrategy {
 
     /**
      * Similarity value used for all synthetic tree edges.
-     * With EdgeLayer's {@code ALPHA_SCALE = 40}, this gives alpha ≈ 20 —
-     * matching {@code ThemeManager.EDGE_DEFAULT} (rgba 255,255,255,0.08).
+     * With EdgeLayer's {@code ALPHA_SCALE = 70}, this gives alpha ≈ 50.
      */
-    private static final double TREE_EDGE_SIMILARITY = 0.5;
+    private static final double TREE_EDGE_SIMILARITY = 50.0 / 70.0;
 
     /** Minimum horizontal pixel distance between adjacent leaf nodes. */
     private static final double MIN_LEAF_SPACING = 80.0;

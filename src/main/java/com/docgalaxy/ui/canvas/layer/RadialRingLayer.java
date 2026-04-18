@@ -16,7 +16,7 @@ import java.awt.geom.Ellipse2D;
  *
  * <p>One circle is drawn per BFS ring at radius {@code ring × ringSpacing}
  * from the centre node's world-space position.  The circles use
- * {@link ThemeManager#EDGE_DEFAULT} (rgba 255,255,255,0.08) and a 0.5 px
+ * {@link ThemeManager#EDGE_DEFAULT} (rgba 255,255,255,40) and a 0.8 px
  * hairline stroke — identical to the KNN edge style — so they read as subtle
  * scaffolding rather than data.
  *
@@ -27,7 +27,7 @@ import java.awt.geom.Ellipse2D;
 public final class RadialRingLayer implements RenderLayer {
 
     private static final BasicStroke RING_STROKE = new BasicStroke(
-            0.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
+            0.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
 
     private final Vector2D center;
     private final int      ringCount;

@@ -43,7 +43,7 @@ public final class EdgeLayer implements RenderLayer {
     static final double SHOW_THRESHOLD = 0.4;
 
     /** Stroke width for normal edges (screen pixels). */
-    static final float STROKE_WIDTH = 0.5f;
+    static final float STROKE_WIDTH = 0.8f;
 
     /** Stroke width for a highlighted edge. */
     static final float HIGHLIGHT_STROKE_WIDTH = 2.0f;
@@ -58,7 +58,7 @@ public final class EdgeLayer implements RenderLayer {
     static final int HIGHLIGHT_HALO_ALPHA = 50;
 
     /** Similarity multiplier → alpha channel (0–255). */
-    static final double ALPHA_SCALE = 40.0;
+    static final double ALPHA_SCALE = 70.0;
 
     private static final BasicStroke EDGE_STROKE = new BasicStroke(
             STROKE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);

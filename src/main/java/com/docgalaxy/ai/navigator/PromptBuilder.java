@@ -41,7 +41,7 @@ final class PromptBuilder {
             "  \"summary\": \"<one-sentence description of the learning route>\",\n" +
             "  \"estimatedTime\": \"<human-readable estimate, e.g. '20 minutes'>\",\n" +
             "  \"route\": [\n" +
-            "    { \"noteId\": \"<id>\", \"reason\": \"<why this note fits here>\", \"order\": <integer starting at 0> }\n" +
+            "    { \"noteId\": \"<exact id from [id=...]>\", \"reason\": \"<why this note fits here>\", \"order\": <integer starting at 0> }\n" +
             "  ]\n" +
             "}";
 

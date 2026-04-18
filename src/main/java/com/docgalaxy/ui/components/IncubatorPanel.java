@@ -21,6 +21,7 @@ public class IncubatorPanel extends JPanel {
 
     private final DefaultListModel<Note> listModel = new DefaultListModel<>();
     private final JList<Note>            list;
+    private final JScrollPane            scroll;
     private       Consumer<Note>         onNoteSelected;
 
     public IncubatorPanel() {
@@ -42,6 +43,7 @@ public class IncubatorPanel extends JPanel {
         list.setSelectionForeground(ThemeManager.TEXT_PRIMARY);
         list.setFixedCellHeight(28);
 
+        list.setVisibleRowCount(0);
         list.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && onNoteSelected != null) {
                 Note selected = list.getSelectedValue();
@@ -49,11 +51,12 @@ public class IncubatorPanel extends JPanel {
             }
         });
 
-        JScrollPane scroll = new JScrollPane(list);
+        scroll = new JScrollPane(list);
         scroll.setBorder(null);
         scroll.setBackground(ThemeManager.BG_SECONDARY);
         scroll.getViewport().setBackground(ThemeManager.BG_SECONDARY);
-        scroll.setPreferredSize(new Dimension(0, 100));
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER);
+        scroll.setVisible(false);   // hidden until there are incubator notes
         add(scroll, BorderLayout.CENTER);
     }
 
@@ -69,12 +72,23 @@ public class IncubatorPanel extends JPanel {
     // Data refresh
     // ----------------------------------------------------------------
 
+    @Override
+    public Dimension getMaximumSize() {
+        Dimension pref = getPreferredSize();
+        return new Dimension(Integer.MAX_VALUE, pref.height);
+    }
+
     public void refresh(KnowledgeBase kb) {
         listModel.clear();
-        if (kb == null) return;
-        kb.getAllNotes().stream()
-            .filter(n -> n.getStatus() == NoteStatus.INCUBATOR)
-            .forEach(listModel::addElement);
+        if (kb != null) {
+            kb.getAllNotes().stream()
+                .filter(n -> n.getStatus() == NoteStatus.INCUBATOR)
+                .forEach(listModel::addElement);
+        }
+        int count = listModel.size();
+        list.setVisibleRowCount(count);
+        scroll.setVisible(count > 0);
+        revalidate();
     }
 
     /** Count of incubator notes currently shown. */

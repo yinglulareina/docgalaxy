@@ -6,18 +6,22 @@ import java.awt.Font;
 public final class ThemeManager {
     private ThemeManager() {}
 
-    // Backgrounds
-    public static final Color BG_PRIMARY = new Color(0x1A, 0x1A, 0x2E);
-    public static final Color BG_SECONDARY = new Color(0x16, 0x21, 0x3E);
-    public static final Color BG_SURFACE = new Color(0x1F, 0x2B, 0x4D);
+    // Backgrounds (VS Code dark theme)
+    public static final Color BG_PRIMARY   = new Color(0x1E, 0x1E, 0x1E);  // #1E1E1E canvas
+    public static final Color BG_SECONDARY = new Color(0x25, 0x25, 0x26);  // #252526 sidebar
+    public static final Color BG_SURFACE   = new Color(0x2D, 0x2D, 0x30);  // #2D2D30 panels
 
     // Text
-    public static final Color TEXT_PRIMARY = new Color(0xE0, 0xE0, 0xE0);
-    public static final Color TEXT_SECONDARY = new Color(0x80, 0x80, 0x99);
+    public static final Color TEXT_PRIMARY   = new Color(0xCC, 0xCC, 0xCC);  // #CCCCCC
+    public static final Color TEXT_SECONDARY = new Color(0x85, 0x85, 0x85);  // #858585
+
+    // Chat bubble backgrounds (navigator panel)
+    public static final Color CHAT_USER_BG = BG_SURFACE;
+    public static final Color CHAT_AI_BG   = BG_PRIMARY;
     public static final Color TEXT_ACCENT = new Color(0x82, 0xAA, 0xFF);
 
     // Edges
-    public static final Color EDGE_DEFAULT = new Color(255, 255, 255, 20);
+    public static final Color EDGE_DEFAULT = new Color(255, 255, 255, 40);
     public static final Color EDGE_HIGHLIGHT = new Color(130, 170, 255, 96);
 
     // Sector palette (8 colors for different star regions)
