@@ -19,6 +19,7 @@ import com.docgalaxy.layout.TreeLayout;
 import com.docgalaxy.model.Edge;
 import com.docgalaxy.model.KnowledgeBase;
 import com.docgalaxy.model.Note;
+import com.docgalaxy.model.NoteStatus;
 import com.docgalaxy.model.Sector;
 import com.docgalaxy.model.Vector2D;
 import com.docgalaxy.model.celestial.CelestialBody;
@@ -490,6 +491,7 @@ public class MainFrame extends JFrame {
 
             List<Note>   pendingNotes    = new ArrayList<>();
             List<String> pendingContents = new ArrayList<>();
+            List<Note>   incubatorNotes  = new ArrayList<>();
             Path absRoot = folder.toAbsolutePath().normalize();
             for (Path file : files) {
                 try {
@@ -497,13 +499,19 @@ public class MainFrame extends JFrame {
                     String relPath    = absRoot.relativize(
                             file.toAbsolutePath().normalize()).toString();
                     String absPath    = file.toAbsolutePath().toString();
+                    String content    = Files.readString(file);
                     String existingId = filePathToId.get(relPath);
                     boolean reused    = existingId != null;
                     Note   note       = reused
                             ? new Note(existingId, absPath, file.getFileName().toString())
                             : new Note(absPath, file.getFileName().toString());
+                    if (content.strip().length() < AppConstants.MIN_CONTENT_LENGTH) {
+                        note.setStatus(NoteStatus.INCUBATOR);
+                        incubatorNotes.add(note);
+                        continue;
+                    }
                     pendingNotes.add(note);
-                    pendingContents.add(Files.readString(file));
+                    pendingContents.add(content);
                 } catch (IOException e) {
                     System.err.println("  Skipping unreadable: " + file.getFileName());
                 }
@@ -741,11 +749,12 @@ public class MainFrame extends JFrame {
                     System.currentTimeMillis() - pipelineStart,
                     stars.size(), nebulae.size(), edges.size());
 
-            final List<Star>              fStars        = stars;
-            final List<Nebula>            fNebulae      = nebulae;
-            final List<Edge>              fEdges        = edges;
-            final List<Sector>            fSectors      = sectors;
-            final List<Note>              fNotes        = notes;
+            final List<Star>              fStars          = stars;
+            final List<Nebula>            fNebulae        = nebulae;
+            final List<Edge>              fEdges          = edges;
+            final List<Sector>            fSectors        = sectors;
+            final List<Note>              fNotes          = notes;
+            final List<Note>              fIncubatorNotes = incubatorNotes;
             final List<NodeData>          fNodeDataList = nodeDataList;
             final List<Cluster>           fClusters     = clusters;
             final Map<String, String>     fNoteToSector = noteToSector;
@@ -780,6 +789,7 @@ public class MainFrame extends JFrame {
 
                 // Sync KB with pipeline results
                 kb.setSectors(fSectors);
+                for (Note n : fIncubatorNotes) kb.addNote(n);
                 for (Star s : fStars) kb.addNote(s.getNote());
                 refreshUIFromKB(kb);
                 statusBar.setStatus("Galaxy ready — " + fStars.size() + " stars, "
@@ -1025,13 +1035,6 @@ public class MainFrame extends JFrame {
                     .filter(p -> {
                         String name = p.getFileName().toString().toLowerCase();
                         return name.endsWith(".md") || name.endsWith(".txt");
-                    })
-                    .filter(p -> {
-                        try {
-                            return Files.readString(p).length() >= AppConstants.MIN_CONTENT_LENGTH;
-                        } catch (IOException e) {
-                            return false;
-                        }
                     })
                     .sorted()
                     .collect(Collectors.toList());

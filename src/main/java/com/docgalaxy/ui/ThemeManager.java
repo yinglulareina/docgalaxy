@@ -15,9 +15,11 @@ public final class ThemeManager {
     public static final Color TEXT_PRIMARY   = new Color(0xCC, 0xCC, 0xCC);  // #CCCCCC
     public static final Color TEXT_SECONDARY = new Color(0x85, 0x85, 0x85);  // #858585
 
-    // Chat bubble backgrounds (navigator panel)
-    public static final Color CHAT_USER_BG = BG_SURFACE;
-    public static final Color CHAT_AI_BG   = BG_PRIMARY;
+    // Chat bubble backgrounds / text (navigator panel)
+    public static final Color CHAT_USER_BG   = new Color(0x3C, 0x3C, 0x3C);  // #3C3C3C
+    public static final Color CHAT_AI_BG     = BG_PRIMARY;                    // #1E1E1E
+    public static final Color CHAT_USER_TEXT = new Color(0xA0, 0xA0, 0xA0);  // #A0A0A0
+    public static final Color CHAT_AI_TEXT   = new Color(0xD4, 0xD4, 0xD4);  // #D4D4D4
     public static final Color TEXT_ACCENT = new Color(0x82, 0xAA, 0xFF);
 
     // Edges
