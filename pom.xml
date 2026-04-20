@@ -46,7 +46,7 @@
           <mainClass>com.docgalaxy.App</mainClass>
         </configuration>
       </plugin>
-      <!-- Fat jar with all deps: mvn package → java -jar target/docgalaxy-fat.jar -->
+      <!-- Fat jar: mvn package → java -jar target/docgalaxy-1.0-SNAPSHOT.jar -->
       <plugin>
         <artifactId>maven-shade-plugin</artifactId>
         <version>3.5.1</version>
@@ -55,8 +55,6 @@
             <phase>package</phase>
             <goals><goal>shade</goal></goals>
             <configuration>
-              <shadedArtifactAttached>true</shadedArtifactAttached>
-              <shadedClassifierName>fat</shadedClassifierName>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>com.docgalaxy.App</mainClass>

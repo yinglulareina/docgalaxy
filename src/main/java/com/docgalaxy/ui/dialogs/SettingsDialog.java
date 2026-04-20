@@ -28,7 +28,7 @@ public class SettingsDialog extends JDialog {
     private final JComboBox<String>   providerBox;
     private final JPasswordField      apiKeyField;
     private final JTextField          modelField;
-    private final JSpinner            dimensionSpinner;
+    private final JTextField          dimensionField;
 
     // Appearance tab
     private final JComboBox<LearningStyle> styleBox;
@@ -48,13 +48,17 @@ public class SettingsDialog extends JDialog {
         this.configStore = new ConfigStore(storeDir);
         this.current     = configStore.loadOrDefault();
 
-        providerBox      = new JComboBox<>(new String[]{"openai", "ollama"});
-        apiKeyField      = new JPasswordField(30);
-        modelField       = new JTextField(20);
-        dimensionSpinner = new JSpinner(new SpinnerNumberModel(1536, 64, 4096, 64));
-        styleBox         = new JComboBox<>(LearningStyle.values());
+        providerBox    = new JComboBox<>(new String[]{"openai", "ollama"});
+        apiKeyField    = new JPasswordField(30);
+        modelField     = new JTextField(20);
+        dimensionField = new JTextField(6);
+        dimensionField.setEditable(false);
+        styleBox       = new JComboBox<>(LearningStyle.values());
 
         populateFromConfig(current);
+
+        // Auto-update model and dimension when provider changes
+        providerBox.addActionListener(e -> syncProviderDefaults());
 
         JPanel content = buildContent();
         setContentPane(content);
@@ -101,13 +105,14 @@ public class SettingsDialog extends JDialog {
         addRow(p, c, 0, "Provider:",  providerBox);
         addRow(p, c, 1, "API Key:",   apiKeyField);
         addRow(p, c, 2, "Model:",     modelField);
-        addRow(p, c, 3, "Dimension:", dimensionSpinner);
+        addRow(p, c, 3, "Dimension:", dimensionField);
 
         // Style all inputs
-        for (JComponent comp : new JComponent[]{apiKeyField, modelField}) {
+        for (JComponent comp : new JComponent[]{apiKeyField, modelField, dimensionField}) {
             comp.setBackground(ThemeManager.BG_SURFACE);
             comp.setForeground(ThemeManager.TEXT_PRIMARY);
         }
+        dimensionField.setDisabledTextColor(ThemeManager.TEXT_SECONDARY);
         providerBox.setBackground(ThemeManager.BG_SURFACE);
 
         return p;
@@ -172,13 +177,24 @@ public class SettingsDialog extends JDialog {
     // Data binding
     // ----------------------------------------------------------------
 
+    private void syncProviderDefaults() {
+        String provider = (String) providerBox.getSelectedItem();
+        if ("ollama".equals(provider)) {
+            modelField.setText("nomic-embed-text");
+            dimensionField.setText("768");
+        } else {
+            modelField.setText("text-embedding-3-small");
+            dimensionField.setText("1536");
+        }
+    }
+
     private void populateFromConfig(AppConfig cfg) {
         providerBox.setSelectedItem(cfg.getEmbedding().provider);
         // Show decrypted key (or empty if null)
         String decrypted = ConfigStore.decryptApiKey(cfg.getEmbedding().apiKey);
         apiKeyField.setText(decrypted != null ? decrypted : "");
         modelField.setText(cfg.getEmbedding().model);
-        dimensionSpinner.setValue(cfg.getEmbedding().dimension);
+        dimensionField.setText(String.valueOf(cfg.getEmbedding().dimension));
 
         try {
             LearningStyle style = LearningStyle.valueOf(cfg.getLearningStyle());
@@ -192,7 +208,7 @@ public class SettingsDialog extends JDialog {
         // Update embedding config
         current.getEmbedding().provider  = (String) providerBox.getSelectedItem();
         current.getEmbedding().model     = modelField.getText().trim();
-        current.getEmbedding().dimension = (Integer) dimensionSpinner.getValue();
+        current.getEmbedding().dimension = Integer.parseInt(dimensionField.getText().trim());
 
         // Encrypt API key if non-empty
         String rawKey = new String(apiKeyField.getPassword()).trim();
